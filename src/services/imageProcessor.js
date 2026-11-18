@@ -28,18 +28,15 @@ export function canvasToPngBlob(canvas) {
 }
 
 /**
- * Reconstructs & protects the person's neck, collar, shoulders, and hijab from the ORIGINAL image
- * WITHOUT adding any fake vertical barcode stretching at the bottom and WITHOUT adding grey paper
- * halos around the ears or cheeks!
- *
- * How it works:
- * 1. Samples the clean background paper color from the brightest 35% of pixels in the top corners
- *    (which automatically ignores dark ink from the black passport eagle stamp).
- * 2. Above the chin (y < faceBottomY - 0.04 * faceH): trusts the padded AI cutout for hair, ears, and face,
- *    and only recovers dark/colored hijab pixels that strongly differ from the paper background color.
- * 3. Below the chin (y >= faceBottomY - 0.04 * faceH down to cutH): protects the neck, white shirt collar,
- *    jacket, and shoulders inside the lower shoulder contour while rejecting light paper background pixels
- *    on the far outer slopes.
+ * Studio-Grade Foreground Reconstruction & Shoulder Contour Finishing:
+ * 1. Protects the inner facial ellipse (so passport holographic stamps across the forehead/cheek
+ *    never cause the AI to punch holes into the face or eyes).
+ * 2. Samples BOTH top-corner paper color AND mid-height background paper color (where AI alpha == 0)
+ *    so shaded scanner paper near the neck is never mistaken for clothing (eliminating grey shelves).
+ * 3. Preserves the central neck/collar core and lower dark/colored clothing from over-erasure.
+ * 4. If a narrow 3:4 portrait scan has shoulders cut off vertically at the left/right edges,
+ *    naturally curves & slopes the shoulders outward and downward so the subject sits gracefully
+ *    inside a 1:1 (600x600) frame without razor-sharp vertical sticker edges or barcode stretching.
  */
 export async function reconstructSubjectWithBodyAndShoulders(
   originalImage,
@@ -88,7 +85,7 @@ export async function reconstructSubjectWithBodyAndShoulders(
     faceBottomY = (faceBox.originY + faceBox.height) * scaleY;
   }
 
-  // Sample the clean background paper color from the brightest 35% of pixels in top corners
+  // Step 1: Sample clean paper color from brightest 35% of top corners
   const cornerH = Math.max(10, Math.round(faceTopY * 0.8));
   const cornerW = Math.max(10, Math.round(cutW * 0.22));
   const cornerSamples = [];
@@ -106,38 +103,90 @@ export async function reconstructSubjectWithBodyAndShoulders(
     }
   }
 
-  let paperR = 235,
-    paperG = 235,
-    paperB = 235;
+  let topPaperLuma = 235;
   if (cornerSamples.length > 0) {
     cornerSamples.sort((a, b) => b.luma - a.luma);
     const take = Math.max(1, Math.round(cornerSamples.length * 0.35));
-    let sR = 0,
-      sG = 0,
-      sB = 0;
-    for (let i = 0; i < take; i++) {
-      sR += cornerSamples[i].r;
-      sG += cornerSamples[i].g;
-      sB += cornerSamples[i].b;
-    }
-    paperR = Math.round(sR / take);
-    paperG = Math.round(sG / take);
-    paperB = Math.round(sB / take);
+    let sumL = 0;
+    for (let i = 0; i < take; i++) sumL += cornerSamples[i].luma;
+    topPaperLuma = sumL / take;
   }
-  const paperLuma = 0.299 * paperR + 0.587 * paperG + 0.114 * paperB;
 
-  // Step 1: Lower Neck, Collar & Shoulders Protection (ONLY starting at chin level!)
-  // Starting at faceBottomY - 0.04 * faceH guarantees ZERO grey background halos around the ears or cheeks!
-  const shoulderStartY = Math.max(0, Math.round(faceBottomY - faceH * 0.04));
-  const featherPx = Math.max(6, faceW * 0.06);
+  // Also sample local side background color where AI cutout has alpha < 15 at mid-face height
+  let sidePaperR = 225,
+    sidePaperG = 225,
+    sidePaperB = 225,
+    sideCount = 0;
+  const midYStart = Math.max(0, Math.round(faceTopY));
+  const midYEnd = Math.min(cutH - 1, Math.round(faceBottomY));
+  for (let y = midYStart; y <= midYEnd; y += 2) {
+    for (let x = 0; x < cutW; x += 2) {
+      const idx = (y * cutW + x) * 4;
+      if (cutData[idx + 3] < 15) {
+        sidePaperR += origData[idx];
+        sidePaperG += origData[idx + 1];
+        sidePaperB += origData[idx + 2];
+        sideCount++;
+      }
+    }
+  }
+  if (sideCount > 0) {
+    sidePaperR = Math.round(sidePaperR / sideCount);
+    sidePaperG = Math.round(sidePaperG / sideCount);
+    sidePaperB = Math.round(sidePaperB / sideCount);
+  }
+  const sidePaperLuma = 0.299 * sidePaperR + 0.587 * sidePaperG + 0.114 * sidePaperB;
+  const refPaperLuma = Math.min(topPaperLuma, sidePaperLuma);
 
-  for (let y = shoulderStartY; y < cutH; y++) {
-    const dy = y - shoulderStartY;
-    // Smooth shoulder slope from neck width (0.54 * faceW) out to full shoulders (1.65 * faceW)
-    const slopeProgress = Math.min(1, dy / Math.max(1, (cutH - shoulderStartY) * 0.65));
-    const maxShoulderHalfW = faceW * (0.54 + 1.15 * Math.sin(slopeProgress * (Math.PI / 2)));
-    // Central collar/neck core where white shirt collars or light ties live
-    const collarCoreHalfW = faceW * (0.48 + 0.25 * slopeProgress);
+  // Step 2: Inner Face & Hairline Ellipse Protection (stops holograms punching holes in face/eyes)
+  const faceEllipseCenterY = faceTopY + faceH * 0.44;
+  const faceEllipseRx = faceW * 0.49;
+  const faceEllipseRy = faceH * 0.58;
+
+  const yEllStart = Math.max(0, Math.floor(faceEllipseCenterY - faceEllipseRy));
+  const yEllEnd = Math.min(cutH - 1, Math.ceil(faceEllipseCenterY + faceEllipseRy));
+  const xEllStart = Math.max(0, Math.floor(faceCenterX - faceEllipseRx));
+  const xEllEnd = Math.min(cutW - 1, Math.ceil(faceCenterX + faceEllipseRx));
+
+  for (let y = yEllStart; y <= yEllEnd; y++) {
+    const normY = (y - faceEllipseCenterY) / faceEllipseRy;
+    for (let x = xEllStart; x <= xEllEnd; x++) {
+      const normX = (x - faceCenterX) / faceEllipseRx;
+      const d2 = normX * normX + normY * normY;
+      if (d2 <= 1.0) {
+        const idx = (y * cutW + x) * 4;
+        const currA = cutData[idx + 3];
+        const targetA = d2 <= 0.85 ? 255 : Math.round(((1.0 - d2) / 0.15) * 255);
+        if (targetA > currA) {
+          cutData[idx] = origData[idx];
+          cutData[idx + 1] = origData[idx + 1];
+          cutData[idx + 2] = origData[idx + 2];
+          cutData[idx + 3] = targetA;
+        }
+      }
+    }
+  }
+
+  // Step 3: Clean Neck, Collar & Lower Clothing Protection (NO grey shoulder-top shelf!)
+  const neckStartY = Math.max(0, Math.round(faceBottomY - faceH * 0.02));
+  const shoulderSlopesStartY = Math.min(cutH - 1, Math.round(faceBottomY + faceH * 0.14));
+  const featherPx = Math.max(5, faceW * 0.05);
+
+  for (let y = neckStartY; y < cutH; y++) {
+    const dyFromChin = y - neckStartY;
+    const totalTorsoSpan = Math.max(1, cutH - neckStartY);
+    const torsoProgress = Math.min(1, dyFromChin / totalTorsoSpan);
+
+    // Narrow central neck/collar core where white shirts or light ties sit
+    const centralCollarHalfW = faceW * (0.42 + 0.36 * torsoProgress);
+    // Wider shoulder zone ONLY activates below shoulderSlopesStartY
+    const allowWideShoulders = y >= shoulderSlopesStartY;
+    const wideSlopeProgress = allowWideShoulders
+      ? Math.min(1, (y - shoulderSlopesStartY) / Math.max(1, cutH - shoulderSlopesStartY))
+      : 0;
+    const maxAllowedHalfW = allowWideShoulders
+      ? faceW * (0.65 + 1.05 * Math.sin(wideSlopeProgress * (Math.PI / 2)))
+      : centralCollarHalfW;
 
     for (let x = 0; x < cutW; x++) {
       const idx = (y * cutW + x) * 4;
@@ -145,28 +194,24 @@ export async function reconstructSubjectWithBodyAndShoulders(
       if (currentAlpha >= 245) continue;
 
       const distFromCenter = Math.abs(x - faceCenterX);
-      if (distFromCenter > maxShoulderHalfW) continue;
+      if (distFromCenter > maxAllowedHalfW) continue;
 
       const r = origData[idx];
       const g = origData[idx + 1];
       const b = origData[idx + 2];
       const pixelLuma = 0.299 * r + 0.587 * g + 0.114 * b;
-      const colorDiffFromPaper =
-        Math.abs(r - paperR) + Math.abs(g - paperG) + Math.abs(b - paperB);
+      const diffFromSidePaper =
+        Math.abs(r - sidePaperR) + Math.abs(g - sidePaperG) + Math.abs(b - sidePaperB);
 
-      // Inside the central collar/neck core (or bottom 12% of the photo), always preserve clothing
-      // Outside the central core (on the shoulder slopes), only restore if the pixel is darker/different
-      // from the light passport background paper! This prevents any grey background triangle above the shoulders.
-      const isInsideCollarCore =
-        distFromCenter <= collarCoreHalfW || y >= cutH - Math.round(cutH * 0.10);
-      const isClearlyClothing =
-        colorDiffFromPaper > 38 || pixelLuma < paperLuma - 18;
+      const isInsideCentralCollar = distFromCenter <= centralCollarHalfW;
+      const isStrongClothing =
+        diffFromSidePaper > 52 || pixelLuma < refPaperLuma - 28;
 
-      if (!isInsideCollarCore && !isClearlyClothing) {
+      if (!isInsideCentralCollar && !isStrongClothing) {
         continue;
       }
 
-      const distFromEdge = maxShoulderHalfW - distFromCenter;
+      const distFromEdge = maxAllowedHalfW - distFromCenter;
       let targetAlpha = 255;
       if (distFromEdge < featherPx) {
         targetAlpha = Math.round((distFromEdge / featherPx) * 255);
@@ -181,21 +226,19 @@ export async function reconstructSubjectWithBodyAndShoulders(
     }
   }
 
-  // Step 2: Clean up any residual faint passport stamp / grey paper fringe around the upper head
-  const upperHeadLimitY = Math.round(faceBottomY - faceH * 0.08);
+  // Step 4: Clean up faint grey paper fringe around upper head
+  const upperHeadLimitY = Math.round(faceBottomY - faceH * 0.06);
   for (let y = 0; y < upperHeadLimitY; y++) {
     for (let x = 0; x < cutW; x++) {
       const idx = (y * cutW + x) * 4;
       const a = cutData[idx + 3];
-      if (a > 0 && a < 180) {
-        // Pull semi-transparent outer hair/head boundary pixels slightly toward white to eliminate grey paper fringe
-        const r = cutData[idx];
-        const g = cutData[idx + 1];
-        const b = cutData[idx + 2];
-        const diffFromPaper =
-          Math.abs(r - paperR) + Math.abs(g - paperG) + Math.abs(b - paperB);
-        if (diffFromPaper < 32) {
-          cutData[idx + 3] = Math.round(a * 0.35);
+      if (a > 0 && a < 185) {
+        const diffFromSide =
+          Math.abs(cutData[idx] - sidePaperR) +
+          Math.abs(cutData[idx + 1] - sidePaperG) +
+          Math.abs(cutData[idx + 2] - sidePaperB);
+        if (diffFromSide < 34) {
+          cutData[idx + 3] = Math.round(a * 0.30);
         }
       }
     }
@@ -205,9 +248,129 @@ export async function reconstructSubjectWithBodyAndShoulders(
   origCanvas.width = 0;
   origCanvas.height = 0;
 
-  const reconstructedBlob = await canvasToPngBlob(cutCanvas);
-  cutCanvas.width = 0;
-  cutCanvas.height = 0;
+  // Step 5: Natural Anatomical Shoulder Contour Extension on Left & Right Edges
+  // Check if foreground shoulders touch the left (x <= 3) or right (x >= cutW - 4) border below chin
+  const shoulderCheckStartY = Math.max(0, Math.round(faceBottomY + faceH * 0.05));
+  let leftTouches = false;
+  let rightTouches = false;
+
+  for (let y = shoulderCheckStartY; y < cutH; y += 2) {
+    if (cutData[(y * cutW + 3) * 4 + 3] > 150) leftTouches = true;
+    if (cutData[(y * cutW + (cutW - 4)) * 4 + 3] > 150) rightTouches = true;
+    if (leftTouches && rightTouches) break;
+  }
+
+  let finalCanvas = cutCanvas;
+  let padLeft = 0;
+
+  if (leftTouches || rightTouches) {
+    const extSide = Math.round(cutW * 0.15);
+    padLeft = leftTouches ? extSide : 0;
+    const padRight = rightTouches ? extSide : 0;
+    const newW = cutW + padLeft + padRight;
+
+    const shoulderCanvas = document.createElement('canvas');
+    shoulderCanvas.width = newW;
+    shoulderCanvas.height = cutH;
+    const sCtx = shoulderCanvas.getContext('2d', { willReadFrequently: true });
+    sCtx.drawImage(cutCanvas, padLeft, 0);
+
+    const sImgData = sCtx.getImageData(0, 0, newW, cutH);
+    const sData = sImgData.data;
+
+    // Helper to sample smoothed edge color from inside the subject border
+    const sampleSmoothedShoulderPixel = (innerStartX, innerEndX, sy) => {
+      if (sy < shoulderCheckStartY || sy >= cutH) return null;
+      let sR = 0,
+        sG = 0,
+        sB = 0,
+        sA = 0,
+        cnt = 0;
+      const yMin = Math.max(0, sy - 1);
+      const yMax = Math.min(cutH - 1, sy + 1);
+      for (let yy = yMin; yy <= yMax; yy++) {
+        for (let xx = innerStartX; xx <= innerEndX; xx++) {
+          const idx = (yy * cutW + xx) * 4;
+          const a = cutData[idx + 3];
+          if (a > 120) {
+            sR += cutData[idx];
+            sG += cutData[idx + 1];
+            sB += cutData[idx + 2];
+            sA += a;
+            cnt++;
+          }
+        }
+      }
+      if (cnt === 0) return null;
+      return {
+        r: sR / cnt,
+        g: sG / cnt,
+        b: sB / cnt,
+        a: sA / cnt,
+      };
+    };
+
+    // Extend LEFT shoulder with natural downward shoulder curve (bridging 3px inside seam to avoid faint line)
+    if (leftTouches) {
+      for (let y = shoulderCheckStartY; y < cutH; y++) {
+        for (let d = -3; d <= padLeft; d++) {
+          const srcY = Math.round(y - Math.max(0, d) * 0.72);
+          const baseInnerX = Math.min(cutW - 12, 4 + Math.round(Math.max(0, d) * 0.22));
+          const sampled = sampleSmoothedShoulderPixel(baseInnerX, baseInnerX + 6, srcY);
+          if (!sampled || sampled.a < 140) continue;
+
+          const edgeFade = d > padLeft - 10 ? (padLeft - d) / 10 : 1.0;
+          const depthShade = 1 - (Math.max(0, d) / padLeft) * 0.05;
+          const targetX = padLeft - d;
+          if (targetX < 0 || targetX >= newW) continue;
+          const dstIdx = (y * newW + targetX) * 4;
+          const newAlpha = Math.round(sampled.a * Math.max(0, Math.min(1, edgeFade)));
+
+          if (d > 0 || newAlpha > sData[dstIdx + 3]) {
+            sData[dstIdx] = Math.round(sampled.r * depthShade);
+            sData[dstIdx + 1] = Math.round(sampled.g * depthShade);
+            sData[dstIdx + 2] = Math.round(sampled.b * depthShade);
+            sData[dstIdx + 3] = newAlpha;
+          }
+        }
+      }
+    }
+
+    // Extend RIGHT shoulder with natural downward shoulder curve (bridging 3px inside seam to avoid faint line)
+    if (rightTouches) {
+      for (let y = shoulderCheckStartY; y < cutH; y++) {
+        for (let d = -3; d <= padRight; d++) {
+          const srcY = Math.round(y - Math.max(0, d) * 0.72);
+          const baseInnerX = Math.max(11, cutW - 5 - Math.round(Math.max(0, d) * 0.22));
+          const sampled = sampleSmoothedShoulderPixel(baseInnerX - 6, baseInnerX, srcY);
+          if (!sampled || sampled.a < 140) continue;
+
+          const edgeFade = d > padRight - 10 ? (padRight - d) / 10 : 1.0;
+          const depthShade = 1 - (Math.max(0, d) / padRight) * 0.05;
+          const targetX = padLeft + cutW - 1 + d;
+          if (targetX < 0 || targetX >= newW) continue;
+          const dstIdx = (y * newW + targetX) * 4;
+          const newAlpha = Math.round(sampled.a * Math.max(0, Math.min(1, edgeFade)));
+
+          if (d > 0 || newAlpha > sData[dstIdx + 3]) {
+            sData[dstIdx] = Math.round(sampled.r * depthShade);
+            sData[dstIdx + 1] = Math.round(sampled.g * depthShade);
+            sData[dstIdx + 2] = Math.round(sampled.b * depthShade);
+            sData[dstIdx + 3] = newAlpha;
+          }
+        }
+      }
+    }
+
+    sCtx.putImageData(sImgData, 0, 0);
+    cutCanvas.width = 0;
+    cutCanvas.height = 0;
+    finalCanvas = shoulderCanvas;
+  }
+
+  const reconstructedBlob = await canvasToPngBlob(finalCanvas);
+  finalCanvas.width = 0;
+  finalCanvas.height = 0;
 
   const reconstructedImg = await loadImageFromBlob(reconstructedBlob);
 
@@ -215,7 +378,7 @@ export async function reconstructSubjectWithBodyAndShoulders(
     blob: reconstructedBlob,
     image: reconstructedImg,
     faceBoxInCutout: {
-      originX: faceCenterX - faceW / 2,
+      originX: faceCenterX + padLeft - faceW / 2,
       originY: faceTopY,
       width: faceW,
       height: faceH,
