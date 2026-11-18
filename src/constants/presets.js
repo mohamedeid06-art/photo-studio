@@ -1,11 +1,15 @@
 export const PHOTO_PRESETS = {
   ksa_mofa: {
     id: 'ksa_mofa',
-    name: 'تأشيرة السعودية / موقع الخارجية (افتراضي)',
-    shortName: 'تأشيرة السعودية (600×600)',
-    badge: 'معتمد لوزارة الخارجية / إنجاز',
+    name: 'تأشيرة السعودية / موقع وزارة الخارجية',
+    shortName: 'الخارجية السعودية (600×600)',
+    authority: 'منصة التأشيرات (إنجاز) / وزارة الخارجية',
+    category: 'official_ksa',
+    badge: 'الافتراضي المعتمد',
+    flag: '🇸🇦',
     width: 600,
     height: 600,
+    physicalSize: '2 × 2 بوصة (5 × 5 سم)',
     minSizeKB: 15,
     maxSizeKB: 200,
     strictLimitKB: 240,
@@ -15,15 +19,41 @@ export const PHOTO_PRESETS = {
     topMarginPercent: 9,
     bgColor: '#FFFFFF',
     description:
-      'مقاس 600×600 بكسل (2×2 بوصة مربع)، خلفية بيضاء ناصعة #FFFFFF، بصيغة JPEG وحجم مضمون بين 15 KB و 240 KB.',
+      'المقاس الرسمي المعتمد لموقع وزارة الخارجية السعودية ومنصة إنجاز: 600×600 بكسل، خلفية بيضاء ناصعة، وحجم مضمون بين 15 و 240 كيلوبايت.',
+  },
+  ksa_nusuk: {
+    id: 'ksa_nusuk',
+    name: 'تأشيرة العمرة والحج (منصة نسك / مسار)',
+    shortName: 'تأشيرة العمرة / نسك (600×600)',
+    authority: 'وزارة الحج والعمرة / منصة نسك',
+    category: 'official_ksa',
+    badge: 'مكاتب العمرة',
+    flag: '🕋',
+    width: 600,
+    height: 600,
+    physicalSize: '2 × 2 بوصة (مربع)',
+    minSizeKB: 15,
+    maxSizeKB: 190,
+    strictLimitKB: 240,
+    dpi: 300,
+    aspectRatio: '1:1',
+    headRatioPercent: 68,
+    topMarginPercent: 9,
+    bgColor: '#FFFFFF',
+    description:
+      'مُعاير خصيصاً لطلبات العمرة والحج مع حماية كاملة لأطراف الحجاب والشماغ وضغط ذكي سريع الرفع على المسار الإلكتروني.',
   },
   standard_passport: {
     id: 'standard_passport',
-    name: 'مقاس جواز سفر قياسي (4×6 سم)',
+    name: 'مقاس جواز سفر قياسي (4 × 6 سم)',
     shortName: 'جواز سفر قياسي (4×6 سم)',
+    authority: 'المعيار الدولي للجوازات (ICAO)',
+    category: 'international',
     badge: '300 DPI قياسي',
+    flag: '🛂',
     width: 472,
     height: 709,
+    physicalSize: '4 × 6 سم (300 DPI)',
     minSizeKB: 15,
     maxSizeKB: 220,
     strictLimitKB: 240,
@@ -33,15 +63,63 @@ export const PHOTO_PRESETS = {
     topMarginPercent: 10,
     bgColor: '#FFFFFF',
     description:
-      'مقاس 472×709 بكسل (4×6 سم بدقة 300 نقطة في البوصة)، خلفية بيضاء ناصعة #FFFFFF.',
+      'مقاس 472×709 بكسل (يعادل 4×6 سم بدقة طباعة 300 نقطة في البوصة) بخلفية بيضاء ناصعة لإصدار وتجديد الجوازات.',
+  },
+  ksa_absher_muqeem: {
+    id: 'ksa_absher_muqeem',
+    name: 'أبشر / مقيم / قوى (4 × 6 رقمي)',
+    shortName: 'أبشر / مقيم (480×640)',
+    authority: 'خدمات الجوازات والإقامة',
+    category: 'official_ksa',
+    badge: 'أبشر / مقيم',
+    flag: '🪪',
+    width: 480,
+    height: 640,
+    physicalSize: '4 × 6 سم رقمي (3:4)',
+    minSizeKB: 15,
+    maxSizeKB: 180,
+    strictLimitKB: 240,
+    dpi: 300,
+    aspectRatio: '3:4',
+    headRatioPercent: 67,
+    topMarginPercent: 9,
+    bgColor: '#FFFFFF',
+    description:
+      'مقاس 480×640 بكسل المخصص لرفع الصور الشخصية في منصات أبشر ومقيم وخدمات الجوازات الإلكترونية.',
+  },
+  schengen_visa: {
+    id: 'schengen_visa',
+    name: 'تأشيرة شنغن الأوروبية (3.5 × 4.5 سم)',
+    shortName: 'تأشيرة شنغن (413×531)',
+    authority: 'سفارات دول الاتحاد الأوروبي',
+    category: 'international',
+    badge: '35×45 ملم',
+    flag: '🇪🇺',
+    width: 413,
+    height: 531,
+    physicalSize: '3.5 × 4.5 سم (300 DPI)',
+    minSizeKB: 15,
+    maxSizeKB: 200,
+    strictLimitKB: 240,
+    dpi: 300,
+    aspectRatio: '7:9',
+    headRatioPercent: 70,
+    topMarginPercent: 8,
+    bgColor: '#FFFFFF',
+    description:
+      'المقاس البيومتري المعتمد لتأشيرات الشنغن (35×45 ملم) مع نسبة استحواذ للرأس 70% من ارتفاع الإطار.',
   },
   custom: {
     id: 'custom',
-    name: 'مقاس مخصص (Custom)',
+    name: 'مقاس مخصص حر (Custom Specification)',
     shortName: 'مقاس مخصص',
+    authority: 'تخصيص يدوي كامل',
+    category: 'custom',
     badge: 'تخصيص حر',
+    flag: '⚙️',
     width: 600,
     height: 600,
+    physicalSize: 'حسب الطلب (بالبكسل)',
     minSizeKB: 15,
     maxSizeKB: 200,
     strictLimitKB: 240,
@@ -50,8 +128,17 @@ export const PHOTO_PRESETS = {
     headRatioPercent: 68,
     topMarginPercent: 9,
     bgColor: '#FFFFFF',
-    description: 'حدد العرض والارتفاع بالبكسل والحد الأقصى والأدنى لحجم الملف بالكيلوبايت يدوياً.',
+    description:
+      'تحكم كامل في العرض والارتفاع بالبكسل والحد الأدنى والأقصى لحجم الملف بالكيلوبايت لأي جهة أو سفارة.',
   },
+};
+
+export const APP_PAGES = {
+  HOME: 'home',
+  STUDIO: 'studio',
+  REVIEW: 'review',
+  PRESETS: 'presets',
+  EXPORT: 'export',
 };
 
 export const DEFAULT_PROCESSING_CONFIG = {
@@ -61,13 +148,13 @@ export const DEFAULT_PROCESSING_CONFIG = {
   minSizeKB: 15,
   maxSizeKB: 200,
   strictLimitKB: 240,
-  headRatioPercent: 68, // 65-70% head height ratio
-  topMarginPercent: 9,  // Top headroom margin above actual top of head/hijab/ghutra
-  brightness: 100,      // 50 to 150 (%)
-  contrast: 100,        // 50 to 150 (%)
-  sharpness: 15,        // 0 to 100 (%) - subtle default sharpness for crisp facial features
-  edgeSmoothing: 1.5,   // 0 to 5 (px feathering for natural transition onto white background)
-  concurrency: 2,       // Process 2 images at a time so browser stays responsive
+  headRatioPercent: 68,
+  topMarginPercent: 9,
+  brightness: 100,
+  contrast: 100,
+  sharpness: 15,
+  edgeSmoothing: 1.5,
+  concurrency: 2,
 };
 
 export const PHOTO_STATUS = {
@@ -80,22 +167,26 @@ export const PHOTO_STATUS = {
 export const STATUS_LABELS = {
   [PHOTO_STATUS.PENDING]: {
     text: 'في الانتظار',
-    bgClass: 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800',
+    bgClass:
+      'bg-amber-500/10 text-amber-700 border-amber-500/25 dark:bg-amber-500/15 dark:text-amber-300 dark:border-amber-500/30',
     dotClass: 'bg-amber-500',
   },
   [PHOTO_STATUS.PROCESSING]: {
     text: 'جاري المعالجة...',
-    bgClass: 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-800',
-    dotClass: 'bg-blue-500 animate-ping',
+    bgClass:
+      'bg-sky-500/10 text-sky-700 border-sky-500/25 dark:bg-sky-500/15 dark:text-sky-300 dark:border-sky-500/30',
+    dotClass: 'bg-sky-500 animate-ping',
   },
   [PHOTO_STATUS.READY]: {
-    text: 'جاهز للتحميل',
-    bgClass: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800',
+    text: 'جاهز ومطابق',
+    bgClass:
+      'bg-emerald-500/10 text-emerald-700 border-emerald-500/25 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/30',
     dotClass: 'bg-emerald-500',
   },
   [PHOTO_STATUS.FAILED]: {
     text: 'فشل المعالجة',
-    bgClass: 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800',
+    bgClass:
+      'bg-rose-500/10 text-rose-700 border-rose-500/25 dark:bg-rose-500/15 dark:text-rose-300 dark:border-rose-500/30',
     dotClass: 'bg-rose-500',
   },
 };

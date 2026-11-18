@@ -1,16 +1,32 @@
-import React, { useState, useCallback } from 'react';
-import { DEFAULT_PROCESSING_CONFIG, PHOTO_STATUS } from './constants/presets';
+import React, { useState, useCallback, useEffect } from 'react';
+import {
+  DEFAULT_PROCESSING_CONFIG,
+  PHOTO_STATUS,
+  APP_PAGES,
+  PHOTO_PRESETS,
+} from './constants/presets';
 import { useTheme } from './hooks/useTheme';
 import { usePhotoQueue } from './hooks/usePhotoQueue';
+import SidebarNav from './components/SidebarNav';
 import Header from './components/Header';
-import SettingsPanel from './components/SettingsPanel';
-import DropzoneUploader from './components/DropzoneUploader';
-import BulkActionBar from './components/BulkActionBar';
-import PhotoGrid from './components/PhotoGrid';
+import HomePage from './pages/HomePage';
+import PresetsConfigPage from './pages/PresetsConfigPage';
+import StudioWorkspacePage from './pages/StudioWorkspacePage';
+import ReviewGalleryPage from './pages/ReviewGalleryPage';
+import ExportCenterPage from './pages/ExportCenterPage';
 import ManualCropModal from './components/ManualCropModal';
+
+function getPageFromHash() {
+  const hash = window.location.hash.replace('#', '').trim();
+  if (Object.values(APP_PAGES).includes(hash)) {
+    return hash;
+  }
+  return APP_PAGES.HOME;
+}
 
 export default function App() {
   const { theme, toggleTheme } = useTheme();
+  const [activePage, setActivePage] = useState(getPageFromHash);
   const [config, setConfig] = useState(DEFAULT_PROCESSING_CONFIG);
   const [editingItemId, setEditingItemId] = useState(null);
 
@@ -30,6 +46,21 @@ export default function App() {
     clearAll,
   } = usePhotoQueue(config);
 
+  // Sync URL hash for multi-page navigation & browser Back/Forward buttons
+  useEffect(() => {
+    const onHashChange = () => {
+      setActivePage(getPageFromHash());
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  const navigateTo = useCallback((pageId) => {
+    setActivePage(pageId);
+    window.location.hash = pageId;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
   const handleConfigChange = useCallback(
     (newConfig, triggerInstantReRender = false) => {
       setConfig(newConfig);
@@ -38,6 +69,29 @@ export default function App() {
       }
     },
     [reRenderProcessedItems]
+  );
+
+  const handleSelectPresetAndGo = useCallback(
+    (presetId, targetPage = APP_PAGES.STUDIO) => {
+      const preset = PHOTO_PRESETS[presetId];
+      if (preset) {
+        const updated = {
+          ...config,
+          presetId: preset.id,
+          width: preset.width,
+          height: preset.height,
+          minSizeKB: preset.minSizeKB,
+          maxSizeKB: preset.maxSizeKB,
+          strictLimitKB: preset.strictLimitKB,
+          headRatioPercent: preset.headRatioPercent,
+          topMarginPercent: preset.topMarginPercent,
+        };
+        setConfig(updated);
+        reRenderProcessedItems(updated);
+      }
+      navigateTo(targetPage);
+    },
+    [config, reRenderProcessedItems, navigateTo]
   );
 
   const handleResetEnhancements = useCallback(() => {
@@ -62,64 +116,101 @@ export default function App() {
     : null;
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
-      {/* Top Navbar */}
-      <Header
-        theme={theme}
-        onToggleTheme={toggleTheme}
+    <div className="min-h-screen flex bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 bg-studio-grid">
+      {/* Right-Hand RTL Sidebar Navigation */}
+      <SidebarNav
+        activePage={activePage}
+        onNavigate={navigateTo}
         totalCount={totalCount}
         readyCount={readyCount}
         pendingCount={pendingCount}
+        config={config}
         isModelLoaded={modelDownloadState.isLoaded}
       />
 
-      {/* Main Dashboard Layout */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Right Sidebar in RTL: Settings & Specifications Panel */}
-          <div className="lg:col-span-4 xl:col-span-4 lg:sticky lg:top-24">
-            <SettingsPanel
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top Glassmorphic Page Header */}
+        <Header
+          activePage={activePage}
+          onNavigate={navigateTo}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          totalCount={totalCount}
+          readyCount={readyCount}
+          pendingCount={pendingCount}
+          config={config}
+        />
+
+        {/* Active Page Container */}
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-8 py-6">
+          {activePage === APP_PAGES.HOME && (
+            <HomePage
+              config={config}
+              onSelectPresetAndGo={handleSelectPresetAndGo}
+              onNavigate={navigateTo}
+              totalCount={totalCount}
+              readyCount={readyCount}
+              pendingCount={pendingCount}
+            />
+          )}
+
+          {activePage === APP_PAGES.PRESETS && (
+            <PresetsConfigPage
               config={config}
               onChangeConfig={handleConfigChange}
               onResetEnhancements={handleResetEnhancements}
               onApplyToProcessed={() => reRenderProcessedItems(config)}
               readyCount={readyCount}
               isReRenderingAll={isReRenderingAll}
+              onNavigate={navigateTo}
             />
-          </div>
+          )}
 
-          {/* Left Main Content in RTL: Dropzone, Bulk Actions & Interactive Review Grid */}
-          <div className="lg:col-span-8 xl:col-span-8 space-y-5">
-            {/* Batch Drag & Drop Uploader */}
-            <DropzoneUploader
-              onAddFiles={addFiles}
-              hasExistingItems={totalCount > 0}
-            />
-
-            {/* Bulk Actions & Global Progress Bar */}
-            <BulkActionBar
+          {activePage === APP_PAGES.STUDIO && (
+            <StudioWorkspacePage
               items={items}
+              config={config}
+              onChangeConfig={handleConfigChange}
               isBatchRunning={isBatchRunning}
+              isReRenderingAll={isReRenderingAll}
               modelDownloadState={modelDownloadState}
+              onAddFiles={addFiles}
+              onProcessSingle={processSinglePhoto}
               onProcessAll={processAllPending}
               onStopBatch={stopBatchProcessing}
               onClearAll={clearAll}
-            />
-
-            {/* Interactive Review Cards Grid */}
-            <PhotoGrid
-              items={items}
-              config={config}
-              onProcessSingle={processSinglePhoto}
               onOpenManualEdit={(item) => setEditingItemId(item.id)}
               onRemove={removeItem}
               onRename={updateItemCustomName}
+              onApplyToProcessed={() => reRenderProcessedItems(config)}
+              onNavigate={navigateTo}
             />
-          </div>
-        </div>
-      </main>
+          )}
 
-      {/* Manual Crop & Enhancement Modal */}
+          {activePage === APP_PAGES.REVIEW && (
+            <ReviewGalleryPage
+              items={items}
+              config={config}
+              onOpenManualEdit={(item) => setEditingItemId(item.id)}
+              onProcessSingle={processSinglePhoto}
+              onRename={updateItemCustomName}
+              onNavigate={navigateTo}
+            />
+          )}
+
+          {activePage === APP_PAGES.EXPORT && (
+            <ExportCenterPage
+              items={items}
+              config={config}
+              onRename={updateItemCustomName}
+              onNavigate={navigateTo}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* Full-Screen Pro Manual Crop & Enhancement Modal */}
       {activeEditingItem && (
         <ManualCropModal
           item={activeEditingItem}
@@ -128,16 +219,6 @@ export default function App() {
           onSave={applyManualEditToItem}
         />
       )}
-
-      {/* Footer */}
-      <footer className="mt-12 border-t border-slate-200/80 dark:border-slate-800/80 bg-white/60 dark:bg-slate-900/60 py-4">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <span>
-            استوديو التأشيرات الذكي — مصمم خصيصاً لمطابقة مواصفات صور وزارة الخارجية السعودية (600×600 • 15–240 KB)
-          </span>
-          <span>يعمل 100% داخل المتصفح عبر WebAssembly &amp; ONNX بدون أي خادم خارجي</span>
-        </div>
-      </footer>
     </div>
   );
 }

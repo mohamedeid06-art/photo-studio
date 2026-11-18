@@ -1,101 +1,140 @@
 import React from 'react';
 import {
-  Camera,
-  ShieldCheck,
   Sun,
   Moon,
-  Sparkles,
+  Upload,
+  FolderDown,
+  ChevronLeft,
+  Sliders,
   CheckCircle2,
   Clock,
 } from 'lucide-react';
+import { APP_PAGES, PHOTO_PRESETS } from '../constants/presets';
+
+const PAGE_TITLES = {
+  [APP_PAGES.HOME]: {
+    title: 'الرئيسية وبوابة الاستوديو',
+    subtitle: 'منصة متكاملة لمعالجة وتجهيز صور التأشيرات والجوازات بالجملة وفق معايير وزارة الخارجية',
+  },
+  [APP_PAGES.PRESETS]: {
+    title: 'قوالب المقاسات الرسمية وإعدادات الجودة',
+    subtitle: 'اختر القالب الرسمي المعتمد للسفارة أو خصص الأبعاد وحدود حجم الملف بالكيلوبايت',
+  },
+  [APP_PAGES.STUDIO]: {
+    title: 'استوديو الرفع والمعالجة بالذكاء الاصطناعي',
+    subtitle: 'رفع الصور بالجملة، تفريغ الخلفية بدقة فائقة، وتوسيط الوجه والشماغ/الحجاب تلقائياً',
+  },
+  [APP_PAGES.REVIEW]: {
+    title: 'صالة المراجعة والتدقيق البيومتري',
+    subtitle: 'معاينة مطابقة الصور لاشتراطات الخارجية وتعديل الإضاءة أو القص اليدوي لكل صورة',
+  },
+  [APP_PAGES.EXPORT]: {
+    title: 'مركز التصدير الجماعي وقوالب الطباعة',
+    subtitle: 'تحميل جميع الصور في ملف مضغوط ZIP بأسمائها الأصلية أو تجهيز كارت طباعة حرارية 4×6',
+  },
+};
 
 export default function Header({
+  activePage,
+  onNavigate,
   theme,
   onToggleTheme,
   totalCount,
   readyCount,
   pendingCount,
-  isModelLoaded,
+  config,
 }) {
+  const pageMeta = PAGE_TITLES[activePage] || PAGE_TITLES[APP_PAGES.HOME];
+  const activePreset = PHOTO_PRESETS[config.presetId] || PHOTO_PRESETS.ksa_mofa;
+
   return (
-    <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-sm">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between gap-4">
-        {/* Brand Identity */}
-        <div className="flex items-center gap-3.5">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-emerald-600 to-emerald-800 flex items-center justify-center text-white shadow-md shadow-emerald-600/20 shrink-0">
-            <Camera className="w-6 h-6" />
+    <header className="sticky top-0 z-20 bg-white/85 dark:bg-slate-900/85 backdrop-blur-xl border-b border-slate-200/80 dark:border-slate-800/80 px-4 sm:px-8 py-4">
+      <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+        {/* Page Title & Breadcrumb */}
+        <div>
+          <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-600 dark:text-emerald-400 mb-0.5">
+            <span>استوديو التأشيرات الذكي</span>
+            <ChevronLeft className="w-3.5 h-3.5" />
+            <span>{pageMeta.title}</span>
           </div>
-          <div>
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white tracking-tight">
-                استوديو التأشيرات والجوازات الذكي
-              </h1>
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800">
-                <ShieldCheck className="w-3.5 h-3.5" />
-                معتمد لوزارة الخارجية السعودية
-              </span>
-            </div>
-            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-              تفريغ خلفية بدقة فائقة • توسيط تلقائي للوجه والشماغ/الحجاب • ضغط ذكي (15–240 KB)
-            </p>
-          </div>
+          <h2 className="text-lg sm:text-xl font-black text-slate-900 dark:text-white tracking-tight">
+            {pageMeta.title}
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 hidden sm:block mt-0.5">
+            {pageMeta.subtitle}
+          </p>
         </div>
 
-        {/* Status Pills & Theme Toggle */}
-        <div className="flex items-center gap-2.5 sm:gap-3">
-          {/* Quick Queue Counters */}
+        {/* Right Controls: Active Preset Pill, Quick Nav Actions, Theme Toggle */}
+        <div className="flex items-center gap-2.5">
+          {/* Active Preset Badge Button */}
+          <button
+            type="button"
+            onClick={() => onNavigate(APP_PAGES.PRESETS)}
+            className="hidden md:flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-100/90 hover:bg-slate-200/70 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200/80 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-slate-200 transition-colors"
+            title="اضغط لتغيير قالب المقاس أو إعدادات الحجم"
+          >
+            <span>{activePreset.flag}</span>
+            <span>{activePreset.shortName}</span>
+            <span className="text-[11px] px-1.5 py-0.5 rounded-md bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 font-extrabold">
+              {config.width}×{config.height}
+            </span>
+            <Sliders className="w-3.5 h-3.5 text-slate-400" />
+          </button>
+
+          {/* Status Counters Pill */}
           {totalCount > 0 && (
-            <div className="hidden md:flex items-center gap-2 bg-slate-100 dark:bg-slate-800/80 px-3.5 py-1.5 rounded-xl border border-slate-200/80 dark:border-slate-700 text-xs font-semibold">
-              <span className="text-slate-600 dark:text-slate-300">
-                الإجمالي: <strong className="text-slate-900 dark:text-white">{totalCount}</strong>
-              </span>
-              <span className="text-slate-300 dark:text-slate-600">|</span>
-              <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+            <div className="hidden sm:flex items-center gap-2 px-3 py-2 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/70 text-xs font-bold">
+              <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300">
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                جاهز: <strong>{readyCount}</strong>
+                جاهز: {readyCount}
               </span>
               {pendingCount > 0 && (
                 <>
-                  <span className="text-slate-300 dark:text-slate-600">|</span>
+                  <span className="text-slate-300 dark:text-slate-700">|</span>
                   <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
                     <Clock className="w-3.5 h-3.5" />
-                    بالانتظار: <strong>{pendingCount}</strong>
+                    انتظار: {pendingCount}
                   </span>
                 </>
               )}
             </div>
           )}
 
-          {/* Local AI Privacy Badge */}
-          <div
-            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
-            title="تتم جميع عمليات المعالجة داخل متصفحك 100% دون رفع أي صورة لأي خادم خارجي"
-          >
-            <Sparkles
-              className={`w-3.5 h-3.5 ${
-                isModelLoaded ? 'text-emerald-500' : 'text-amber-500'
-              }`}
-            />
-            <span>{isModelLoaded ? 'الذكاء الاصطناعي جاهز' : 'معالجة محلية 100%'}</span>
-          </div>
+          {/* Contextual Primary CTA */}
+          {activePage !== APP_PAGES.STUDIO && pendingCount === 0 && readyCount === 0 && (
+            <button
+              type="button"
+              onClick={() => onNavigate(APP_PAGES.STUDIO)}
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold shadow-sm shadow-emerald-600/20 flex items-center gap-1.5 transition-all"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>رفع الصور الآن</span>
+            </button>
+          )}
 
-          {/* Theme Toggle (Light Mode Default) */}
+          {readyCount > 0 && activePage !== APP_PAGES.EXPORT && (
+            <button
+              type="button"
+              onClick={() => onNavigate(APP_PAGES.EXPORT)}
+              className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 dark:bg-emerald-600 dark:hover:bg-emerald-500 text-white text-xs font-extrabold shadow-sm flex items-center gap-1.5 transition-all"
+            >
+              <FolderDown className="w-3.5 h-3.5" />
+              <span>مركز التصدير ({readyCount})</span>
+            </button>
+          )}
+
+          {/* Theme Toggle */}
           <button
             type="button"
             onClick={onToggleTheme}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/80 text-slate-700 dark:text-slate-200 text-xs font-bold shadow-sm transition-all"
+            className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shadow-sm transition-all"
             title={theme === 'dark' ? 'التبديل إلى الوضع النهاري' : 'التبديل إلى الوضع الليلي'}
           >
             {theme === 'dark' ? (
-              <>
-                <Sun className="w-4 h-4 text-amber-400" />
-                <span className="hidden sm:inline">الوضع النهاري</span>
-              </>
+              <Sun className="w-4 h-4 text-amber-400" />
             ) : (
-              <>
-                <Moon className="w-4 h-4 text-slate-600" />
-                <span className="hidden sm:inline">الوضع الليلي</span>
-              </>
+              <Moon className="w-4 h-4 text-slate-600" />
             )}
           </button>
         </div>
