@@ -21,7 +21,7 @@ async function getFaceDetector() {
             'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
         },
         runningMode: 'IMAGE',
-        minDetectionConfidence: 0.45,
+        minDetectionConfidence: 0.38,
       });
       return faceDetectorInstance;
     } catch (err) {
@@ -35,8 +35,53 @@ async function getFaceDetector() {
 }
 
 /**
- * Scans the alpha channel of the background-removed cutout image to locate
- * the exact top of the head/hijab/ghutra and foreground bounding box.
+ * Selects the primary (largest & most centered) face when multiple faces appear.
+ */
+function selectPrimaryFace(detections, imgWidth) {
+  if (!detections || detections.length === 0) return null;
+  if (detections.length === 1) return detections[0];
+
+  const imgCenterX = imgWidth / 2;
+  let bestDetection = detections[0];
+  let bestScore = -Infinity;
+
+  for (const det of detections) {
+    const box = det.boundingBox;
+    if (!box) continue;
+    const area = box.width * box.height;
+    const faceCenterX = box.originX + box.width / 2;
+    const distFromCenterNormalized = Math.abs(faceCenterX - imgCenterX) / (imgWidth * 0.5);
+    const centralityMultiplier = Math.max(0.3, 1.15 - distFromCenterNormalized * 0.6);
+    const score = area * centralityMultiplier;
+    if (score > bestScore) {
+      bestScore = score;
+      bestDetection = det;
+    }
+  }
+
+  return bestDetection;
+}
+
+/**
+ * Detects the primary face boundingBox on an HTMLImageElement (preferably the raw original image).
+ */
+export async function detectPrimaryFaceBox(imageElement) {
+  try {
+    const detector = await getFaceDetector();
+    if (!detector) return null;
+    const imgW = imageElement.naturalWidth || imageElement.width;
+    const result = detector.detect(imageElement);
+    const chosen = selectPrimaryFace(result?.detections, imgW);
+    return chosen?.boundingBox || null;
+  } catch (err) {
+    console.warn('detectPrimaryFaceBox fallback:', err);
+    return null;
+  }
+}
+
+/**
+ * Scans the alpha channel of the cutout image to locate the foreground bounding box
+ * and exact top of hair/hijab/ghutra.
  */
 export function analyzeForegroundMask(cutoutImage) {
   const sampleMax = 400;
@@ -62,7 +107,6 @@ export function analyzeForegroundMask(cutoutImage) {
   let maxY = 0;
   let foundPixels = 0;
 
-  // Threshold alpha > 45 to ignore faint background noise
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const alpha = data[(y * w + x) * 4 + 3];
@@ -89,7 +133,6 @@ export function analyzeForegroundMask(cutoutImage) {
     };
   }
 
-  // Also compute the horizontal center of the upper 35% of the subject (the head region)
   const headRegionBottom = Math.min(maxY, Math.round(minY + (maxY - minY) * 0.38));
   let headSumX = 0;
   let headCount = 0;
@@ -118,41 +161,11 @@ export function analyzeForegroundMask(cutoutImage) {
 }
 
 /**
- * Selects the primary (largest & most centered) face when multiple faces appear.
- */
-function selectPrimaryFace(detections, imgWidth, imgHeight) {
-  if (!detections || detections.length === 0) return null;
-  if (detections.length === 1) return detections[0];
-
-  const imgCenterX = imgWidth / 2;
-  let bestDetection = detections[0];
-  let bestScore = -Infinity;
-
-  for (const det of detections) {
-    const box = det.boundingBox;
-    if (!box) continue;
-    const area = box.width * box.height;
-    const faceCenterX = box.originX + box.width / 2;
-    const distFromCenterNormalized = Math.abs(faceCenterX - imgCenterX) / (imgWidth * 0.5);
-    // Favor larger face area and proximity to horizontal center
-    const centralityMultiplier = Math.max(0.3, 1.15 - distFromCenterNormalized * 0.6);
-    const score = area * centralityMultiplier;
-    if (score > bestScore) {
-      bestScore = score;
-      bestDetection = det;
-    }
-  }
-
-  return bestDetection;
-}
-
-/**
- * Computes the optimal passport crop box combining MediaPipe Face Detection
- * AND the Foreground Alpha Mask (to preserve Hijab, Ghutra/Shemagh, and hair tops).
- *
- * @param {HTMLImageElement} cutoutImage - Transparent foreground image
- * @param {Object} options - { targetWidth, targetHeight, headRatioPercent, topMarginPercent }
- * @returns {Promise<Object>} Crop specification: { cropBox: { x, y, width, height }, detectedFace: boolean, faceMetrics }
+ * Computes the optimal passport crop box on the reconstructed cutout (which already includes
+ * the restored & extended shoulders/chest), ensuring:
+ * - Balanced top headroom above hair/hijab/ghutra
+ * - Full shoulders & upper chest (الجسم والكتفين) visible in the lower ~36-42% of the frame
+ * - Strict bottom anchoring so cropTopY + cropHeight never exceeds the body bottom (zero floating heads!)
  */
 export async function computeSmartPassportCrop(cutoutImage, options = {}) {
   const imgW = cutoutImage.naturalWidth || cutoutImage.width;
@@ -162,26 +175,17 @@ export async function computeSmartPassportCrop(cutoutImage, options = {}) {
   const targetH = options.targetHeight || 600;
   const targetAspect = targetW / targetH;
 
-  // headRatioPercent default is 68 (representing ~68% head & upper-neck presence)
-  const headRatio = Math.min(0.85, Math.max(0.45, (options.headRatioPercent || 68) / 100));
-  const topMarginRatio = Math.min(0.2, Math.max(0.04, (options.topMarginPercent || 9) / 100));
+  // Map user slider (54..78, default 64) to head crown-to-chin fraction (~0.48..0.56)
+  // leaving ~9% top margin and ~36-42% below the chin for neck, collar, and shoulders/chest!
+  const rawSlider = Number(options.headRatioPercent || 64);
+  const crownToChinFraction = Math.min(0.58, Math.max(0.42, (rawSlider / 100) * 0.76));
+  const topMarginRatio = Math.min(0.15, Math.max(0.05, (options.topMarginPercent || 8) / 100));
 
-  // Step 1: Analyze foreground mask for exact crown / hijab / ghutra top
   const maskBox = analyzeForegroundMask(cutoutImage);
 
-  // Step 2: Detect face using MediaPipe
-  let primaryFaceBox = null;
-  try {
-    const detector = await getFaceDetector();
-    if (detector) {
-      const result = detector.detect(cutoutImage);
-      const chosen = selectPrimaryFace(result?.detections, imgW, imgH);
-      if (chosen?.boundingBox) {
-        primaryFaceBox = chosen.boundingBox;
-      }
-    }
-  } catch (err) {
-    console.warn('Face detection execution fallback to alpha mask:', err);
+  let primaryFaceBox = options.precomputedFaceBox || null;
+  if (!primaryFaceBox) {
+    primaryFaceBox = await detectPrimaryFaceBox(cutoutImage);
   }
 
   let cropWidth;
@@ -190,61 +194,47 @@ export async function computeSmartPassportCrop(cutoutImage, options = {}) {
   let cropTopY;
 
   if (primaryFaceBox) {
-    // MediaPipe face box generally runs from eyebrows/forehead to chin
     const faceTopY = primaryFaceBox.originY;
     const faceBottomY = primaryFaceBox.originY + primaryFaceBox.height;
     const faceH = primaryFaceBox.height;
     const faceCenterX = primaryFaceBox.originX + primaryFaceBox.width / 2;
 
-    // Estimate crown without headwear (~28% above MediaPipe's upper face box)
-    const estimatedCrownY = Math.max(0, faceTopY - faceH * 0.28);
+    const estimatedCrownY = Math.max(0, faceTopY - faceH * 0.32);
 
-    // Fuse with actual foreground mask top (protects Hijab, Ghutra/Igal, puffy hair)
-    // Only trust maskBox.topY if it lies within a plausible range above the face
     let actualHeadTopY = estimatedCrownY;
     if (
       maskBox.valid &&
       maskBox.topY < estimatedCrownY &&
-      maskBox.topY >= faceTopY - faceH * 0.95
+      maskBox.topY >= Math.max(0, faceTopY - faceH * 0.85)
     ) {
-      actualHeadTopY = maskBox.topY;
-    } else if (maskBox.valid && maskBox.topY > estimatedCrownY && maskBox.topY < faceTopY) {
       actualHeadTopY = maskBox.topY;
     }
 
-    // Full physical head height from top of hijab/ghutra/hair down to chin
-    const fullHeadHeight = Math.max(faceH * 1.15, faceBottomY - actualHeadTopY);
+    const fullHeadHeight = Math.max(faceH * 1.22, faceBottomY - actualHeadTopY);
 
-    // Biometric proportion: fullHeadHeight + upper neck anchor occupies headRatio of frame
-    // Converting head-to-chin height into total frame height:
-    const effectiveCrownToChinFraction = headRatio * 0.81;
-    cropHeight = fullHeadHeight / effectiveCrownToChinFraction;
-    cropWidth = cropHeight * targetAspect;
-
-    // Blend face center X with upper-mask center X (90% face center, 10% mask symmetry)
-    cropCenterX = maskBox.valid
-      ? faceCenterX * 0.88 + maskBox.centerX * 0.12
-      : faceCenterX;
-
-    // Position top of crop so actualHeadTopY has exact topMarginRatio headroom
+    cropHeight = fullHeadHeight / crownToChinFraction;
     cropTopY = actualHeadTopY - cropHeight * topMarginRatio;
+
+    // Never allow cropTopY + cropHeight to extend below imgH (the bottom of the body/shoulders)!
+    // This guarantees the person's chest/shoulders always touch the very bottom edge of the photo.
+    const bodyBottomY = maskBox.valid ? Math.min(imgH, maskBox.bottomY) : imgH;
+    if (cropTopY + cropHeight > bodyBottomY) {
+      cropHeight = Math.max(fullHeadHeight * 1.35, bodyBottomY - Math.max(0, cropTopY));
+      if (cropTopY + cropHeight > bodyBottomY) {
+        cropTopY = Math.max(0, bodyBottomY - cropHeight);
+      }
+    }
+
+    cropWidth = cropHeight * targetAspect;
+    cropCenterX = faceCenterX;
   } else {
-    // Fallback: Smart Alpha-Mask Portrait Framing when face detector misses
-    const subjectTop = maskBox.valid ? maskBox.topY : imgH * 0.08;
-    const subjectHeight = maskBox.valid ? maskBox.height : imgH * 0.85;
-    const subjectWidth = maskBox.valid ? maskBox.width : imgW * 0.75;
-
-    // Estimate head height from subject silhouette aspect
-    const estimatedHeadH = Math.min(subjectHeight * 0.52, subjectWidth * 0.72);
-    const effectiveCrownToChinFraction = headRatio * 0.81;
-
-    cropHeight = Math.max(
-      estimatedHeadH / effectiveCrownToChinFraction,
-      subjectWidth * 0.92 / targetAspect
-    );
+    const subjectTop = maskBox.valid ? maskBox.topY : imgH * 0.05;
+    const subjectBottom = maskBox.valid ? maskBox.bottomY : imgH;
+    const headroomPx = (subjectBottom - subjectTop) * 0.09;
+    cropTopY = Math.max(0, subjectTop - headroomPx);
+    cropHeight = subjectBottom - cropTopY;
     cropWidth = cropHeight * targetAspect;
     cropCenterX = maskBox.valid ? maskBox.centerX : imgW / 2;
-    cropTopY = subjectTop - cropHeight * topMarginRatio;
   }
 
   const cropX = cropCenterX - cropWidth / 2;

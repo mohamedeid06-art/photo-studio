@@ -1,8 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { PHOTO_STATUS } from '../constants/presets';
 import { removePhotoBackground, getIsModelLoaded } from '../services/backgroundRemoval';
-import { computeSmartPassportCrop } from '../services/faceDetection';
-import { loadImageFromBlob, renderPassportPhoto } from '../services/imageProcessor';
+import {
+  computeSmartPassportCrop,
+  detectPrimaryFaceBox,
+} from '../services/faceDetection';
+import {
+  loadImageFromBlob,
+  reconstructSubjectWithBodyAndShoulders,
+  renderPassportPhoto,
+} from '../services/imageProcessor';
 import { getBaseFileName } from '../services/zipExporter';
 
 let nextUniqueId = 1;
@@ -25,7 +32,6 @@ export function usePhotoQueue(config) {
 
   const abortBatchRef = useRef(false);
 
-  // Revoke object URLs safely
   const revokeItemUrls = useCallback((item) => {
     if (!item) return;
     if (item.originalUrl) URL.revokeObjectURL(item.originalUrl);
@@ -33,21 +39,17 @@ export function usePhotoQueue(config) {
     if (item.processedUrl) URL.revokeObjectURL(item.processedUrl);
   }, []);
 
-  // Cleanup all URLs on unmount
   useEffect(() => {
     return () => {
       itemsRef.current.forEach((item) => revokeItemUrls(item));
     };
   }, [revokeItemUrls]);
 
-  /**
-   * Adds selected/dropped files to the queue in 'pending' status (في الانتظار)
-   * without starting AI processing until the user clicks "معالجة الكل".
-   */
   const addFiles = useCallback((fileList) => {
-    const validFiles = Array.from(fileList || []).filter((file) =>
-      /\.(jpe?g|png|webp)$/i.test(file.name) ||
-      ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
+    const validFiles = Array.from(fileList || []).filter(
+      (file) =>
+        /\.(jpe?g|png|webp)$/i.test(file.name) ||
+        ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
     );
 
     if (validFiles.length === 0) return 0;
@@ -66,6 +68,7 @@ export function usePhotoQueue(config) {
         cutoutUrl: null,
         cutoutWidth: 0,
         cutoutHeight: 0,
+        cachedFaceBox: null,
         processedBlob: null,
         processedUrl: null,
         outputSizeKB: 0,
@@ -86,9 +89,6 @@ export function usePhotoQueue(config) {
     return newItems.length;
   }, []);
 
-  /**
-   * Updates the custom filename of a specific card inline.
-   */
   const updateItemCustomName = useCallback((id, newName) => {
     setItems((prev) =>
       prev.map((item) => (item.id === id ? { ...item, customName: newName } : item))
@@ -97,41 +97,48 @@ export function usePhotoQueue(config) {
 
   /**
    * Core pipeline for a single photo item:
-   * Step 1: Remove background via @imgly/background-removal (or reuse cached cutoutBlob)
-   * Step 2: Detect face + foreground alpha mask top (protecting hijab/ghutra)
-   * Step 3: Render on #FFFFFF canvas with enhancements & edge feathering
-   * Step 4: Smart JPEG compression binary search between minSizeKB (15KB) & maxSizeKB
+   * Step 1: Detect face on ORIGINAL image + Remove background via @imgly/background-removal
+   * Step 2: Reconstruct & protect Anatomical Neck, Collar, Shoulders, Hijab, and extend short scanner crops
+   * Step 3: Compute Smart Biometric Crop showing full Head + Shoulders/Body anchored to bottom edge
+   * Step 4: Render on #FFFFFF canvas with enhancements & Smart JPEG binary search compression (15-240 KB)
    */
-  const processSinglePhoto = useCallback(
-    async (itemId, forceReSegment = false) => {
-      const targetItem = itemsRef.current.find((i) => i.id === itemId);
-      if (!targetItem) return false;
+  const processSinglePhoto = useCallback(async (itemId, forceReSegment = false) => {
+    const targetItem = itemsRef.current.find((i) => i.id === itemId);
+    if (!targetItem) return false;
 
-      const activeConfig = configRef.current;
+    const activeConfig = configRef.current;
 
-      setItems((prev) =>
-        prev.map((i) =>
-          i.id === itemId
-            ? {
-                ...i,
-                status: PHOTO_STATUS.PROCESSING,
-                progressStep:
-                  i.cutoutBlob && !forceReSegment
-                    ? 'جاري ضبط المقاس والضغط...'
-                    : 'جاري إزالة الخلفية بالذكاء الاصطناعي...',
-                errorMessage: null,
-              }
-            : i
-        )
-      );
+    setItems((prev) =>
+      prev.map((i) =>
+        i.id === itemId
+          ? {
+              ...i,
+              status: PHOTO_STATUS.PROCESSING,
+              progressStep:
+                i.cutoutBlob && !forceReSegment
+                  ? 'جاري ضبط المقاس وإظهار الجسم...'
+                  : 'جاري تفريغ الخلفية وحماية الجسم والكتفين...',
+              errorMessage: null,
+            }
+          : i
+      )
+    );
 
-      try {
-        let cutoutBlob = targetItem.cutoutBlob;
-        let cutoutUrl = targetItem.cutoutUrl;
+    try {
+      let cutoutBlob = targetItem.cutoutBlob;
+      let cutoutUrl = targetItem.cutoutUrl;
+      let cutoutImg = null;
+      let faceBoxInCutout = targetItem.cachedFaceBox;
 
-        // Step 1: Background Removal (if not already cached)
-        if (!cutoutBlob || forceReSegment) {
-          cutoutBlob = await removePhotoBackground(targetItem.file, (progressInfo) => {
+      if (!cutoutBlob || forceReSegment) {
+        // Load original image & detect primary face on original pixels
+        const originalImg = await loadImageFromBlob(targetItem.file);
+        const rawFaceBox = await detectPrimaryFaceBox(originalImg);
+
+        // Run AI background removal
+        const rawAiCutoutBlob = await removePhotoBackground(
+          targetItem.file,
+          (progressInfo) => {
             if (progressInfo.phase === 'model_download' && progressInfo.isFirstLoad) {
               setModelDownloadState({
                 isDownloading: true,
@@ -139,119 +146,128 @@ export function usePhotoQueue(config) {
                 isLoaded: false,
               });
             }
-          });
-
-          setModelDownloadState({
-            isDownloading: false,
-            percent: 100,
-            isLoaded: true,
-          });
-
-          if (cutoutUrl) URL.revokeObjectURL(cutoutUrl);
-          cutoutUrl = URL.createObjectURL(cutoutBlob);
-        }
-
-        // Load transparent cutout into HTMLImageElement
-        const cutoutImg = await loadImageFromBlob(cutoutBlob);
-        const cutoutWidth = cutoutImg.naturalWidth || cutoutImg.width;
-        const cutoutHeight = cutoutImg.naturalHeight || cutoutImg.height;
-
-        setItems((prev) =>
-          prev.map((i) =>
-            i.id === itemId
-              ? { ...i, progressStep: 'جاري تحديد الوجه وتوسيط الرأس...' }
-              : i
-          )
+          }
         );
 
-        // Step 2: Face Detection + Alpha Mask Crown/Hijab/Ghutra Framing
-        const smartCropResult = await computeSmartPassportCrop(cutoutImg, {
-          targetWidth: activeConfig.width,
-          targetHeight: activeConfig.height,
-          headRatioPercent: activeConfig.headRatioPercent,
-          topMarginPercent: activeConfig.topMarginPercent,
+        setModelDownloadState({
+          isDownloading: false,
+          percent: 100,
+          isLoaded: true,
         });
 
-        const autoCropBox = smartCropResult.cropBox;
+        const rawAiCutoutImg = await loadImageFromBlob(rawAiCutoutBlob);
 
-        // Step 3 & 4: Render onto #FFFFFF canvas & run Smart JPEG Compression Loop
         setItems((prev) =>
           prev.map((i) =>
             i.id === itemId
-              ? { ...i, progressStep: 'جاري تحسين الجودة وضغط الحجم...' }
+              ? { ...i, progressStep: 'جاري استعادة الكتفين والجسم وتوسيط الوجه...' }
               : i
           )
         );
 
-        const itemOverrides = targetItem.manualAdjustments || {};
-        const renderSettings = {
-          width: activeConfig.width,
-          height: activeConfig.height,
-          minSizeKB: activeConfig.minSizeKB,
-          maxSizeKB: activeConfig.maxSizeKB,
-          brightness: itemOverrides.brightness ?? activeConfig.brightness,
-          contrast: itemOverrides.contrast ?? activeConfig.contrast,
-          sharpness: itemOverrides.sharpness ?? activeConfig.sharpness,
-          edgeSmoothing: itemOverrides.edgeSmoothing ?? activeConfig.edgeSmoothing,
-          rotation: itemOverrides.rotation ?? 0,
-        };
-
-        const rendered = await renderPassportPhoto(cutoutImg, autoCropBox, renderSettings);
-
-        setItems((prev) =>
-          prev.map((i) => {
-            if (i.id !== itemId) return i;
-            if (i.processedUrl) URL.revokeObjectURL(i.processedUrl);
-            const newProcessedUrl = URL.createObjectURL(rendered.blob);
-
-            return {
-              ...i,
-              cutoutBlob,
-              cutoutUrl,
-              cutoutWidth,
-              cutoutHeight,
-              processedBlob: rendered.blob,
-              processedUrl: newProcessedUrl,
-              outputSizeKB: rendered.sizeKB,
-              outputQuality: rendered.quality,
-              outputWidth: rendered.width,
-              outputHeight: rendered.height,
-              status: PHOTO_STATUS.READY,
-              progressStep: '',
-              errorMessage: null,
-              detectedFace: smartCropResult.detectedFace,
-              autoCropBox,
-              activeCropBox: autoCropBox,
-            };
-          })
+        // Reconstruct neck, collar, shoulders, hijab & extend short scanner crops
+        const reconstructed = await reconstructSubjectWithBodyAndShoulders(
+          originalImg,
+          rawAiCutoutImg,
+          rawFaceBox
         );
 
-        return true;
-      } catch (err) {
-        console.error('Error processing photo:', err);
-        setModelDownloadState((prev) => ({ ...prev, isDownloading: false }));
-        setItems((prev) =>
-          prev.map((i) =>
-            i.id === itemId
-              ? {
-                  ...i,
-                  status: PHOTO_STATUS.FAILED,
-                  progressStep: '',
-                  errorMessage: err?.message || 'حدث خطأ أثناء معالجة الصورة',
-                }
-              : i
-          )
-        );
-        return false;
+        cutoutBlob = reconstructed.blob;
+        cutoutImg = reconstructed.image;
+        faceBoxInCutout = reconstructed.faceBoxInCutout;
+
+        if (cutoutUrl) URL.revokeObjectURL(cutoutUrl);
+        cutoutUrl = URL.createObjectURL(cutoutBlob);
+      } else {
+        cutoutImg = await loadImageFromBlob(cutoutBlob);
       }
-    },
-    []
-  );
 
-  /**
-   * Processes all PENDING and FAILED photos in controlled parallel batches (concurrency = 2)
-   * so the browser stays responsive even with 30-50 images.
-   */
+      const cutoutWidth = cutoutImg.naturalWidth || cutoutImg.width;
+      const cutoutHeight = cutoutImg.naturalHeight || cutoutImg.height;
+
+      // Compute Smart Crop showing head + full shoulders/upper body anchored to bottom edge
+      const smartCropResult = await computeSmartPassportCrop(cutoutImg, {
+        targetWidth: activeConfig.width,
+        targetHeight: activeConfig.height,
+        headRatioPercent: activeConfig.headRatioPercent,
+        topMarginPercent: activeConfig.topMarginPercent,
+        precomputedFaceBox: faceBoxInCutout,
+      });
+
+      const autoCropBox = smartCropResult.cropBox;
+
+      setItems((prev) =>
+        prev.map((i) =>
+          i.id === itemId
+            ? { ...i, progressStep: 'جاري تحسين الجودة وضغط الحجم...' }
+            : i
+        )
+      );
+
+      const itemOverrides = targetItem.manualAdjustments || {};
+      const renderSettings = {
+        width: activeConfig.width,
+        height: activeConfig.height,
+        minSizeKB: activeConfig.minSizeKB,
+        maxSizeKB: activeConfig.maxSizeKB,
+        brightness: itemOverrides.brightness ?? activeConfig.brightness,
+        contrast: itemOverrides.contrast ?? activeConfig.contrast,
+        sharpness: itemOverrides.sharpness ?? activeConfig.sharpness,
+        edgeSmoothing: itemOverrides.edgeSmoothing ?? activeConfig.edgeSmoothing,
+        rotation: itemOverrides.rotation ?? 0,
+      };
+
+      const rendered = await renderPassportPhoto(cutoutImg, autoCropBox, renderSettings);
+
+      setItems((prev) =>
+        prev.map((i) => {
+          if (i.id !== itemId) return i;
+          if (i.processedUrl) URL.revokeObjectURL(i.processedUrl);
+          const newProcessedUrl = URL.createObjectURL(rendered.blob);
+
+          return {
+            ...i,
+            cutoutBlob,
+            cutoutUrl,
+            cutoutWidth,
+            cutoutHeight,
+            cachedFaceBox: faceBoxInCutout,
+            processedBlob: rendered.blob,
+            processedUrl: newProcessedUrl,
+            outputSizeKB: rendered.sizeKB,
+            outputQuality: rendered.quality,
+            outputWidth: rendered.width,
+            outputHeight: rendered.height,
+            status: PHOTO_STATUS.READY,
+            progressStep: '',
+            errorMessage: null,
+            detectedFace: smartCropResult.detectedFace,
+            autoCropBox,
+            activeCropBox: autoCropBox,
+          };
+        })
+      );
+
+      return true;
+    } catch (err) {
+      console.error('Error processing photo:', err);
+      setModelDownloadState((prev) => ({ ...prev, isDownloading: false }));
+      setItems((prev) =>
+        prev.map((i) =>
+          i.id === itemId
+            ? {
+                ...i,
+                status: PHOTO_STATUS.FAILED,
+                progressStep: '',
+                errorMessage: err?.message || 'حدث خطأ أثناء معالجة الصورة',
+              }
+            : i
+        )
+      );
+      return false;
+    }
+  }, []);
+
   const processAllPending = useCallback(async () => {
     if (isBatchRunning) return;
 
@@ -271,7 +287,6 @@ export function usePhotoQueue(config) {
       while (currentIndex < pendingIds.length && !abortBatchRef.current) {
         const idx = currentIndex++;
         const targetId = pendingIds[idx];
-        // Check that item still exists
         if (itemsRef.current.some((i) => i.id === targetId)) {
           await processSinglePhoto(targetId, false);
         }
@@ -287,18 +302,10 @@ export function usePhotoQueue(config) {
     setIsBatchRunning(false);
   }, [isBatchRunning, processSinglePhoto]);
 
-  /**
-   * Stops/pauses the active batch queue after the currently executing pair finishes.
-   */
   const stopBatchProcessing = useCallback(() => {
     abortBatchRef.current = true;
   }, []);
 
-  /**
-   * Instantly re-renders all READY photos from their cached transparent cutoutBlob
-   * when global sliders (Brightness, Contrast, Sharpness, Edge Smoothing, Head Ratio, or Preset Dimensions) change!
-   * Takes milliseconds per photo without re-running the AI background removal model.
-   */
   const reRenderProcessedItems = useCallback(async (overrideConfig) => {
     const activeConfig = overrideConfig || configRef.current;
     const readyItems = itemsRef.current.filter(
@@ -313,7 +320,6 @@ export function usePhotoQueue(config) {
         const cutoutImg = await loadImageFromBlob(item.cutoutBlob);
         let cropBoxToUse = item.activeCropBox;
 
-        // Recompute auto-crop if user didn't lock a custom manual crop or if aspect ratio changed
         const hasManualCrop = Boolean(item.manualAdjustments?.cropBox);
         const currentTargetAspect = activeConfig.width / activeConfig.height;
         const prevCropAspect = cropBoxToUse ? cropBoxToUse.width / cropBoxToUse.height : 0;
@@ -325,6 +331,7 @@ export function usePhotoQueue(config) {
             targetHeight: activeConfig.height,
             headRatioPercent: activeConfig.headRatioPercent,
             topMarginPercent: activeConfig.topMarginPercent,
+            precomputedFaceBox: item.cachedFaceBox,
           });
           cropBoxToUse = smartCrop.cropBox;
         }
@@ -366,10 +373,6 @@ export function usePhotoQueue(config) {
     }
   }, []);
 
-  /**
-   * Saves manual crop / rotation / enhancement edits from ManualCropModal
-   * using the cached transparent cutout.
-   */
   const applyManualEditToItem = useCallback(async (itemId, manualData) => {
     const item = itemsRef.current.find((i) => i.id === itemId);
     if (!item || !item.cutoutBlob) return false;
@@ -413,9 +416,6 @@ export function usePhotoQueue(config) {
     return true;
   }, []);
 
-  /**
-   * Removes a single item and cleans up its Object URLs from RAM.
-   */
   const removeItem = useCallback(
     (itemId) => {
       setItems((prev) => {
@@ -427,9 +427,6 @@ export function usePhotoQueue(config) {
     [revokeItemUrls]
   );
 
-  /**
-   * Clears all items and releases all allocated Object URLs from memory.
-   */
   const clearAll = useCallback(() => {
     abortBatchRef.current = true;
     setIsBatchRunning(false);

@@ -10,7 +10,7 @@ export function loadImageFromBlob(blob) {
       URL.revokeObjectURL(url);
       resolve(img);
     };
-    img.onerror = (err) => {
+    img.onerror = () => {
       URL.revokeObjectURL(url);
       reject(new Error('تعذر قراءة بيانات الصورة'));
     };
@@ -19,14 +19,245 @@ export function loadImageFromBlob(blob) {
 }
 
 /**
+ * Converts an HTMLCanvasElement into a PNG Blob.
+ */
+export function canvasToPngBlob(canvas) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), 'image/png', 1.0);
+  });
+}
+
+/**
+ * Reconstructs & protects the person's neck, collar, shoulders, upper chest (الجسم والكتفين),
+ * and hijab/ghutra from the ORIGINAL image whenever @imgly/background-removal over-erases them,
+ * AND smoothly extends the shoulders/chest downward if the original photo is a tightly-cropped
+ * passport scan (like 20.A18115760) that ends right below the chin.
+ *
+ * @param {HTMLImageElement} originalImage - Raw original image
+ * @param {HTMLImageElement} cutoutImage - AI background-removed transparent image
+ * @param {Object|null} faceBox - Detected face boundingBox in originalImage coordinates
+ * @returns {Promise<{ blob: Blob, image: HTMLImageElement, faceBoxInCutout: Object }>}
+ */
+export async function reconstructSubjectWithBodyAndShoulders(
+  originalImage,
+  cutoutImage,
+  faceBox
+) {
+  const cutW = cutoutImage.naturalWidth || cutoutImage.width;
+  const cutH = cutoutImage.naturalHeight || cutoutImage.height;
+  const origW = originalImage.naturalWidth || originalImage.width;
+  const origH = originalImage.naturalHeight || originalImage.height;
+
+  // Draw originalImage scaled to (cutW, cutH)
+  const origCanvas = document.createElement('canvas');
+  origCanvas.width = cutW;
+  origCanvas.height = cutH;
+  const origCtx = origCanvas.getContext('2d', { willReadFrequently: true });
+  origCtx.imageSmoothingEnabled = true;
+  origCtx.imageSmoothingQuality = 'high';
+  origCtx.drawImage(originalImage, 0, 0, cutW, cutH);
+  const origData = origCtx.getImageData(0, 0, cutW, cutH).data;
+
+  // Draw AI cutoutImage at (cutW, cutH)
+  const cutCanvas = document.createElement('canvas');
+  cutCanvas.width = cutW;
+  cutCanvas.height = cutH;
+  const cutCtx = cutCanvas.getContext('2d', { willReadFrequently: true });
+  cutCtx.drawImage(cutoutImage, 0, 0, cutW, cutH);
+  const cutImgData = cutCtx.getImageData(0, 0, cutW, cutH);
+  const cutData = cutImgData.data;
+
+  // Map face coordinates into (cutW, cutH) space
+  const scaleX = cutW / origW;
+  const scaleY = cutH / origH;
+
+  let faceCenterX = cutW * 0.5;
+  let faceTopY = cutH * 0.25;
+  let faceBottomY = cutH * 0.80;
+  let faceW = cutW * 0.62;
+  let faceH = cutH * 0.55;
+
+  if (faceBox) {
+    faceW = faceBox.width * scaleX;
+    faceH = faceBox.height * scaleY;
+    faceCenterX = (faceBox.originX + faceBox.width / 2) * scaleX;
+    faceTopY = faceBox.originY * scaleY;
+    faceBottomY = (faceBox.originY + faceBox.height) * scaleY;
+  }
+
+  const estimatedCrownY = Math.max(0, faceTopY - faceH * 0.34);
+  const fullHeadHeight = Math.max(faceH * 1.2, faceBottomY - estimatedCrownY);
+
+  // Check if AI cutout stripped away the headscarf/hijab around the cheeks/ears
+  const checkY = Math.min(cutH - 1, Math.max(0, Math.round(faceTopY + faceH * 0.65)));
+  let maskLeftX = cutW,
+    maskRightX = 0;
+  for (let x = 0; x < cutW; x++) {
+    if (cutData[(checkY * cutW + x) * 4 + 3] > 80) {
+      if (x < maskLeftX) maskLeftX = x;
+      if (x > maskRightX) maskRightX = x;
+    }
+  }
+  const midFaceMaskWidth = maskRightX > maskLeftX ? maskRightX - maskLeftX : 0;
+  const needsHeadwearRecovery = midFaceMaskWidth < faceW * 1.28;
+
+  // Step 1: Unconditionally restore Anatomical Neck, Collar, Shoulders & Hijab from originalImage
+  // Start neck/shoulder dome above the jawline (faceBottomY - 0.22 * faceH) so jacket/hijab
+  // meeting the cheeks/beard is 100% preserved!
+  const neckStartY = Math.max(0, faceBottomY - faceH * 0.22);
+  const featherWidthPx = Math.max(8, faceW * 0.08);
+
+  for (let y = Math.round(estimatedCrownY); y < cutH; y++) {
+    let anatomicalHalfW = 0;
+
+    if (y >= neckStartY) {
+      // Rapid, smooth anatomical shoulder slope from jawline/neck out to the shoulders
+      const dy = y - neckStartY;
+      const shoulderProgress = Math.min(1, dy / (faceH * 0.28));
+      const baseNeckFactor = needsHeadwearRecovery ? 0.78 : 0.58;
+      // Expands to 1.75 * faceW half-width (3.5x face width total across both shoulders)
+      const shoulderExpansion = 1.15 * Math.sin(shoulderProgress * (Math.PI / 2));
+      anatomicalHalfW = faceW * (baseNeckFactor + shoulderExpansion);
+    } else if (needsHeadwearRecovery && y >= estimatedCrownY) {
+      // Headscarf / Hijab / Ghutra protective dome around forehead, cheeks & jaw
+      const headProgress = (y - estimatedCrownY) / Math.max(1, neckStartY - estimatedCrownY);
+      const domeArch = Math.sin(Math.min(1, headProgress * 0.85 + 0.15) * (Math.PI / 2));
+      anatomicalHalfW = faceW * (0.78 * domeArch);
+    }
+
+    if (anatomicalHalfW <= 0) continue;
+
+    for (let x = 0; x < cutW; x++) {
+      const idx = (y * cutW + x) * 4;
+      const currentAlpha = cutData[idx + 3];
+      if (currentAlpha >= 250) continue;
+
+      const distFromCenter = Math.abs(x - faceCenterX);
+      if (distFromCenter > anatomicalHalfW) continue;
+
+      const distFromEdge = anatomicalHalfW - distFromCenter;
+      let targetAnatomicalAlpha = 255;
+      if (distFromEdge < featherWidthPx) {
+        targetAnatomicalAlpha = Math.round((distFromEdge / featherWidthPx) * 255);
+      }
+
+      if (targetAnatomicalAlpha > currentAlpha) {
+        cutData[idx] = origData[idx];
+        cutData[idx + 1] = origData[idx + 1];
+        cutData[idx + 2] = origData[idx + 2];
+        cutData[idx + 3] = targetAnatomicalAlpha;
+      }
+    }
+  }
+
+  cutCtx.putImageData(cutImgData, 0, 0);
+  origCanvas.width = 0;
+  origCanvas.height = 0;
+
+  // Step 2: Check if the original photo is a tightly-cropped passport scan that cuts off right below the chin!
+  // We guarantee at least 0.55 * fullHeadHeight of body/chest (الجسم والكتفين) below faceBottomY.
+  const existingBodyBelowChin = Math.max(0, cutH - faceBottomY);
+  const desiredBodyBelowChin = fullHeadHeight * 0.55;
+
+  let finalCanvas = cutCanvas;
+
+  if (existingBodyBelowChin < desiredBodyBelowChin * 0.92) {
+    // Tightly-cropped passport scan detected (like 20.A18115760)!
+    // Extend the canvas downward and smoothly continue the person's shoulders & collar/chest
+    const extraHeight = Math.round(desiredBodyBelowChin - existingBodyBelowChin);
+    const extendedH = cutH + extraHeight;
+
+    const extCanvas = document.createElement('canvas');
+    extCanvas.width = cutW;
+    extCanvas.height = extendedH;
+    const extCtx = extCanvas.getContext('2d', { willReadFrequently: true });
+
+    extCtx.drawImage(cutCanvas, 0, 0);
+    const extImgData = extCtx.getImageData(0, 0, cutW, extendedH);
+    const extData = extImgData.data;
+
+    // Sample strip near the bottom of cutCanvas (avoiding the bottom 2% edge artifact)
+    const sampleY = Math.max(
+      Math.round(faceBottomY),
+      cutH - Math.max(4, Math.round(cutH * 0.03))
+    );
+    const bottomShoulderHalfW = faceW * 1.72;
+
+    for (let y = cutH; y < extendedH; y++) {
+      const extProgress = (y - cutH) / Math.max(1, extraHeight);
+      const rowSpread = 1 + extProgress * 0.14;
+      const rowHalfW = bottomShoulderHalfW * rowSpread;
+      const shadeFactor = 1 - extProgress * 0.05;
+
+      for (let x = 0; x < cutW; x++) {
+        const distFromCenter = Math.abs(x - faceCenterX);
+        if (distFromCenter > rowHalfW) continue;
+
+        const mappedX = Math.min(
+          cutW - 1,
+          Math.max(0, Math.round(faceCenterX + (x - faceCenterX) / rowSpread))
+        );
+
+        let sumR = 0,
+          sumG = 0,
+          sumB = 0,
+          sumA = 0,
+          count = 0;
+        for (let dx = -2; dx <= 2; dx++) {
+          const sx = Math.min(cutW - 1, Math.max(0, mappedX + dx));
+          const sIdx = (sampleY * cutW + sx) * 4;
+          sumR += extData[sIdx];
+          sumG += extData[sIdx + 1];
+          sumB += extData[sIdx + 2];
+          sumA += extData[sIdx + 3];
+          count++;
+        }
+
+        const distFromEdge = rowHalfW - distFromCenter;
+        let edgeAlpha = Math.round(sumA / count);
+        if (distFromEdge < featherWidthPx) {
+          edgeAlpha = Math.min(edgeAlpha, Math.round((distFromEdge / featherWidthPx) * 255));
+        }
+
+        const dstIdx = (y * cutW + x) * 4;
+        extData[dstIdx] = Math.round((sumR / count) * shadeFactor);
+        extData[dstIdx + 1] = Math.round((sumG / count) * shadeFactor);
+        extData[dstIdx + 2] = Math.round((sumB / count) * shadeFactor);
+        extData[dstIdx + 3] = edgeAlpha;
+      }
+    }
+
+    extCtx.putImageData(extImgData, 0, 0);
+    cutCanvas.width = 0;
+    cutCanvas.height = 0;
+    finalCanvas = extCanvas;
+  }
+
+  const reconstructedBlob = await canvasToPngBlob(finalCanvas);
+  finalCanvas.width = 0;
+  finalCanvas.height = 0;
+
+  const reconstructedImg = await loadImageFromBlob(reconstructedBlob);
+
+  return {
+    blob: reconstructedBlob,
+    image: reconstructedImg,
+    faceBoxInCutout: {
+      originX: faceCenterX - faceW / 2,
+      originY: faceTopY,
+      width: faceW,
+      height: faceH,
+    },
+  };
+}
+
+/**
  * Applies a 3x3 sharpening convolution filter to ImageData for fixing soft/blurry WhatsApp photos.
- * @param {ImageData} imageData
- * @param {number} sharpnessPercent - 0 to 100
  */
 function applySharpnessFilter(imageData, sharpnessPercent) {
   if (!sharpnessPercent || sharpnessPercent <= 0) return imageData;
 
-  const amount = (sharpnessPercent / 100) * 0.45; // Balanced strength
+  const amount = (sharpnessPercent / 100) * 0.45;
   const w = imageData.width;
   const h = imageData.height;
   const src = imageData.data;
@@ -35,7 +266,6 @@ function applySharpnessFilter(imageData, sharpnessPercent) {
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const idx = (y * w + x) * 4;
-      // Only sharpen visible pixels
       if (src[idx + 3] < 10) continue;
 
       const top = ((y - 1) * w + x) * 4;
@@ -64,8 +294,6 @@ function refineCutoutAlphaEdges(imageData, edgeSmoothingPx = 1.5) {
   const h = imageData.height;
   const data = imageData.data;
 
-  // Step 1: De-fringe outer semi-transparent pixels & pre-blend edge RGB towards white
-  // This removes dark room halo artifacts around hair, hijab, and shoulders
   const alphaCopy = new Uint8Array(w * h);
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     let a = data[i + 3];
@@ -80,7 +308,6 @@ function refineCutoutAlphaEdges(imageData, edgeSmoothingPx = 1.5) {
 
   if (edgeSmoothingPx <= 0) return;
 
-  // Step 2: Feather boundary alpha channel with a lightweight separable 3x3 box pass
   const passes = edgeSmoothingPx >= 2.5 ? 2 : 1;
   const currentAlpha = new Uint8Array(alphaCopy);
   const nextAlpha = new Uint8Array(w * h);
@@ -90,7 +317,6 @@ function refineCutoutAlphaEdges(imageData, edgeSmoothingPx = 1.5) {
       for (let x = 1; x < w - 1; x++) {
         const p = y * w + x;
         const centerA = currentAlpha[p];
-        // Only smooth edge transition pixels (0 < alpha < 255 or adjacent to transparent)
         const minNeighbor = Math.min(
           currentAlpha[p - 1],
           currentAlpha[p + 1],
@@ -151,12 +377,10 @@ function canvasToJpegBlob(canvas, quality) {
 
 /**
  * Pads a valid JPEG blob with a standard JPEG Comment (COM 0xFF 0xFE) metadata segment
- * if an extremely uniform image compresses below the KSA Ministry 15 KB minimum limit
- * even at 100% quality. This guarantees 100% valid JPEG decoding while strictly satisfying
- * the >= minSizeKB rule.
+ * if an extremely uniform image compresses below the KSA Ministry 15 KB minimum limit.
  */
 async function ensureMinimumJpegSize(jpegBlob, minSizeKB) {
-  const minBytes = Math.round((minSizeKB + 2) * 1024); // Target e.g. 17 KB if min is 15 KB
+  const minBytes = Math.round((minSizeKB + 2) * 1024);
   if (jpegBlob.size >= minSizeKB * 1024) {
     return jpegBlob;
   }
@@ -164,13 +388,11 @@ async function ensureMinimumJpegSize(jpegBlob, minSizeKB) {
   const buffer = await jpegBlob.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
-  // Verify SOI marker (0xFF 0xD8)
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
     return jpegBlob;
   }
 
   const neededPadding = Math.min(48000, Math.max(1024, minBytes - bytes.length));
-  // JPEG COM segment: 0xFF 0xFE + 2-byte big-endian length (including length bytes) + payload
   const payloadLength = neededPadding;
   const segmentLength = payloadLength + 2;
   const comSegment = new Uint8Array(4 + payloadLength);
@@ -179,12 +401,10 @@ async function ensureMinimumJpegSize(jpegBlob, minSizeKB) {
   comSegment[2] = (segmentLength >> 8) & 0xff;
   comSegment[3] = segmentLength & 0xff;
 
-  // Fill comment payload with deterministic ASCII metadata characters
   for (let i = 0; i < payloadLength; i++) {
     comSegment[4 + i] = 0x4b + (i % 26);
   }
 
-  // Insert right after SOI (first 2 bytes)
   const output = new Uint8Array(bytes.length + comSegment.length);
   output.set(bytes.subarray(0, 2), 0);
   output.set(comSegment, 2);
@@ -194,15 +414,12 @@ async function ensureMinimumJpegSize(jpegBlob, minSizeKB) {
 }
 
 /**
- * Smart JPEG Compression Loop using Iterative Binary Search:
- * Finds the optimal JPEG quality (between 0.96 down to 0.40) so the file size is
- * strictly under maxSizeKB and above minSizeKB while maximizing visual clarity.
+ * Smart JPEG Compression Loop using Iterative Binary Search.
  */
 export async function compressCanvasToTargetBounds(canvas, minSizeKB = 15, maxSizeKB = 200) {
   const minBytes = minSizeKB * 1024;
   const maxBytes = maxSizeKB * 1024;
 
-  // First try high quality (0.95)
   let bestBlob = await canvasToJpegBlob(canvas, 0.95);
   let bestQuality = 0.95;
 
@@ -214,7 +431,6 @@ export async function compressCanvasToTargetBounds(canvas, minSizeKB = 15, maxSi
     };
   }
 
-  // Case A: Image at 0.95 is smaller than minBytes -> try maximum quality 1.0
   if (bestBlob.size < minBytes) {
     bestBlob = await canvasToJpegBlob(canvas, 1.0);
     bestQuality = 1.0;
@@ -228,7 +444,6 @@ export async function compressCanvasToTargetBounds(canvas, minSizeKB = 15, maxSi
     };
   }
 
-  // Case B: Image at 0.95 exceeds maxBytes -> Binary search in [0.40, 0.94]
   let low = 0.40;
   let high = 0.94;
   let candidateBlob = null;
@@ -241,19 +456,17 @@ export async function compressCanvasToTargetBounds(canvas, minSizeKB = 15, maxSi
     if (testBlob.size <= maxBytes) {
       candidateBlob = testBlob;
       candidateQuality = mid;
-      low = mid; // Try higher quality while staying <= maxBytes
+      low = mid;
     } else {
-      high = mid; // Need stronger compression
+      high = mid;
     }
   }
 
-  // If even 0.40 exceeded maxBytes (rare for 600x600), step down to 0.25
   if (!candidateBlob) {
     candidateBlob = await canvasToJpegBlob(canvas, 0.35);
     candidateQuality = 0.35;
   }
 
-  // Ensure it didn't drop below minBytes
   if (candidateBlob.size < minBytes) {
     candidateBlob = await ensureMinimumJpegSize(candidateBlob, minSizeKB);
   }
@@ -266,16 +479,11 @@ export async function compressCanvasToTargetBounds(canvas, minSizeKB = 15, maxSi
 }
 
 /**
- * Renders the transparent cutout onto an HTML5 <canvas> with target passport dimensions,
- * applies brightness/contrast/sharpness & edge smoothing, fills pure white #FFFFFF background,
- * and runs the Smart JPEG Compression Loop.
- *
- * @param {HTMLImageElement} cutoutImage - Transparent background-removed image
- * @param {Object} cropBox - { x, y, width, height } in cutoutImage pixel coordinates
- * @param {Object} settings - { width, height, minSizeKB, maxSizeKB, brightness, contrast, sharpness, edgeSmoothing, rotation }
- * @returns {Promise<{ blob: Blob, sizeKB: number, quality: number, width: number, height: number }>}
+ * Renders the reconstructed transparent cutout (with full shoulders & body)
+ * onto an HTML5 <canvas> with target passport dimensions, pure white #FFFFFF background,
+ * and Smart JPEG Compression Loop.
  */
-export async function renderPassportPhoto(cutoutImage, cropBox, settings) {
+export async function renderPassportPhoto(cutoutSource, cropBox, settings) {
   const targetW = Math.max(100, Math.round(Number(settings.width) || 600));
   const targetH = Math.max(100, Math.round(Number(settings.height) || 600));
   const brightness = Number(settings.brightness ?? 100);
@@ -286,7 +494,9 @@ export async function renderPassportPhoto(cutoutImage, cropBox, settings) {
   const minSizeKB = Math.max(1, Number(settings.minSizeKB ?? 15));
   const maxSizeKB = Math.max(minSizeKB + 10, Number(settings.maxSizeKB ?? 200));
 
-  // Step 1: Draw the cropped subject onto an offscreen transparent canvas
+  const srcW = cutoutSource.naturalWidth || cutoutSource.width;
+  const srcH = cutoutSource.naturalHeight || cutoutSource.height;
+
   const subjectCanvas = document.createElement('canvas');
   subjectCanvas.width = targetW;
   subjectCanvas.height = targetH;
@@ -295,7 +505,6 @@ export async function renderPassportPhoto(cutoutImage, cropBox, settings) {
   subjectCtx.imageSmoothingEnabled = true;
   subjectCtx.imageSmoothingQuality = 'high';
 
-  // Apply CSS brightness & contrast filter during draw
   if (brightness !== 100 || contrast !== 100) {
     subjectCtx.filter = `brightness(${brightness}%) contrast(${contrast}%)`;
   }
@@ -310,17 +519,15 @@ export async function renderPassportPhoto(cutoutImage, cropBox, settings) {
     subjectCtx.translate(-targetW / 2, -targetH / 2);
   }
 
-  // Map cropBox (x, y, width, height) in source image to (0, 0, targetW, targetH)
   const destX = -cropBox.x * scaleX;
   const destY = -cropBox.y * scaleY;
-  const destW = (cutoutImage.naturalWidth || cutoutImage.width) * scaleX;
-  const destH = (cutoutImage.naturalHeight || cutoutImage.height) * scaleY;
+  const destW = srcW * scaleX;
+  const destH = srcH * scaleY;
 
-  subjectCtx.drawImage(cutoutImage, destX, destY, destW, destH);
+  subjectCtx.drawImage(cutoutSource, destX, destY, destW, destH);
   subjectCtx.restore();
   subjectCtx.filter = 'none';
 
-  // Step 2: Refine alpha edges (de-fringe & feathering) and apply sharpness filter
   if (edgeSmoothing > 0 || sharpness > 0) {
     const imgData = subjectCtx.getImageData(0, 0, targetW, targetH);
     if (edgeSmoothing > 0) {
@@ -332,7 +539,6 @@ export async function renderPassportPhoto(cutoutImage, cropBox, settings) {
     subjectCtx.putImageData(imgData, 0, 0);
   }
 
-  // Step 3: Composite onto final canvas with pure solid white (#FFFFFF) background
   const finalCanvas = document.createElement('canvas');
   finalCanvas.width = targetW;
   finalCanvas.height = targetH;
@@ -344,11 +550,9 @@ export async function renderPassportPhoto(cutoutImage, cropBox, settings) {
   finalCtx.imageSmoothingQuality = 'high';
   finalCtx.drawImage(subjectCanvas, 0, 0);
 
-  // Dispose offscreen subject canvas immediately to free memory
   subjectCanvas.width = 0;
   subjectCanvas.height = 0;
 
-  // Step 4: Smart JPEG Compression Loop
   try {
     const compressed = await compressCanvasToTargetBounds(finalCanvas, minSizeKB, maxSizeKB);
     return {
