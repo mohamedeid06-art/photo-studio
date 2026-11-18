@@ -161,11 +161,10 @@ export function analyzeForegroundMask(cutoutImage) {
 }
 
 /**
- * Computes the optimal passport crop box on the reconstructed cutout (which already includes
- * the restored & extended shoulders/chest), ensuring:
- * - Balanced top headroom above hair/hijab/ghutra
- * - Full shoulders & upper chest (الجسم والكتفين) visible in the lower ~36-42% of the frame
- * - Strict bottom anchoring so cropTopY + cropHeight never exceeds the body bottom (zero floating heads!)
+ * Computes the optimal passport crop box on the reconstructed cutout so that:
+ * 1. The bottom of the crop box NEVER extends below imgH (the actual bottom of the photograph),
+ *    so the person's real shoulders/collar/hijab sit flush on the bottom edge (y = 600) with ZERO barcode stretching and ZERO floating head!
+ * 2. The top of the head/hijab/ghutra has balanced white headroom (~8-10%).
  */
 export async function computeSmartPassportCrop(cutoutImage, options = {}) {
   const imgW = cutoutImage.naturalWidth || cutoutImage.width;
@@ -175,10 +174,8 @@ export async function computeSmartPassportCrop(cutoutImage, options = {}) {
   const targetH = options.targetHeight || 600;
   const targetAspect = targetW / targetH;
 
-  // Map user slider (54..78, default 64) to head crown-to-chin fraction (~0.48..0.56)
-  // leaving ~9% top margin and ~36-42% below the chin for neck, collar, and shoulders/chest!
-  const rawSlider = Number(options.headRatioPercent || 64);
-  const crownToChinFraction = Math.min(0.58, Math.max(0.42, (rawSlider / 100) * 0.76));
+  const rawSlider = Number(options.headRatioPercent || 68);
+  const crownToChinFraction = Math.min(0.65, Math.max(0.45, (rawSlider / 100) * 0.80));
   const topMarginRatio = Math.min(0.15, Math.max(0.05, (options.topMarginPercent || 8) / 100));
 
   const maskBox = analyzeForegroundMask(cutoutImage);
@@ -210,29 +207,36 @@ export async function computeSmartPassportCrop(cutoutImage, options = {}) {
       actualHeadTopY = maskBox.topY;
     }
 
-    const fullHeadHeight = Math.max(faceH * 1.22, faceBottomY - actualHeadTopY);
+    const fullHeadHeight = Math.max(faceH * 1.2, faceBottomY - actualHeadTopY);
 
-    cropHeight = fullHeadHeight / crownToChinFraction;
-    cropTopY = actualHeadTopY - cropHeight * topMarginRatio;
+    // Ideal crop height from slider
+    const idealCropHeight = fullHeadHeight / crownToChinFraction;
+    const desiredHeadroomPx = idealCropHeight * topMarginRatio;
+    cropTopY = actualHeadTopY - desiredHeadroomPx;
 
-    // Never allow cropTopY + cropHeight to extend below imgH (the bottom of the body/shoulders)!
-    // This guarantees the person's chest/shoulders always touch the very bottom edge of the photo.
-    const bodyBottomY = maskBox.valid ? Math.min(imgH, maskBox.bottomY) : imgH;
-    if (cropTopY + cropHeight > bodyBottomY) {
-      cropHeight = Math.max(fullHeadHeight * 1.35, bodyBottomY - Math.max(0, cropTopY));
-      if (cropTopY + cropHeight > bodyBottomY) {
-        cropTopY = Math.max(0, bodyBottomY - cropHeight);
-      }
+    // Crucial rule: The bottom of the crop (cropBottomY) must NEVER exceed imgH (the actual bottom edge of the photo)!
+    // If idealCropHeight extends past imgH (as in passport scanner photos), clamp cropBottomY strictly to imgH
+    // so the real shoulders/collar touch the bottom border of the 600x600 canvas cleanly!
+    const idealCropBottomY = cropTopY + idealCropHeight;
+
+    if (idealCropBottomY > imgH) {
+      const realSubjectSpan = imgH - actualHeadTopY;
+      // Give 9% headroom above the top of hair/hijab, and end strictly at imgH!
+      const balancedHeadroom = realSubjectSpan * (topMarginRatio / (1 - topMarginRatio));
+      cropTopY = actualHeadTopY - balancedHeadroom;
+      cropHeight = imgH - cropTopY;
+    } else {
+      cropHeight = idealCropHeight;
     }
 
     cropWidth = cropHeight * targetAspect;
     cropCenterX = faceCenterX;
   } else {
-    const subjectTop = maskBox.valid ? maskBox.topY : imgH * 0.05;
-    const subjectBottom = maskBox.valid ? maskBox.bottomY : imgH;
-    const headroomPx = (subjectBottom - subjectTop) * 0.09;
-    cropTopY = Math.max(0, subjectTop - headroomPx);
-    cropHeight = subjectBottom - cropTopY;
+    const subjectTop = maskBox.valid ? maskBox.topY : imgH * 0.04;
+    const realSubjectSpan = imgH - subjectTop;
+    const headroomPx = realSubjectSpan * 0.09;
+    cropTopY = subjectTop - headroomPx;
+    cropHeight = imgH - cropTopY;
     cropWidth = cropHeight * targetAspect;
     cropCenterX = maskBox.valid ? maskBox.centerX : imgW / 2;
   }

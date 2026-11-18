@@ -2,17 +2,17 @@ import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 
 /**
- * Strips the file extension from a filename while keeping the exact original base name.
+ * Strips ONLY the trailing image file extension (.jpg, .jpeg, .png, .webp)
+ * while preserving dots inside passport scanner filenames such as "20.A18115760".
  */
 export function getBaseFileName(filename = 'photo') {
-  const trimmed = filename.trim();
-  const lastDotIdx = trimmed.lastIndexOf('.');
-  if (lastDotIdx <= 0) return trimmed || 'photo';
-  return trimmed.slice(0, lastDotIdx);
+  const trimmed = String(filename || '').trim();
+  const withoutExt = trimmed.replace(/\.(jpe?g|png|webp|bmp|gif)$/i, '').trim();
+  return withoutExt || 'photo';
 }
 
 /**
- * Ensures a clean .jpg filename preserving the original (or user-edited) base name.
+ * Ensures a clean .jpg filename preserving the full original (or user-edited) base name.
  */
 export function formatOutputJpgName(baseOrFullName) {
   const base = getBaseFileName(baseOrFullName).replace(/[\\/:*?"<>|]/g, '_');
@@ -30,7 +30,7 @@ export function downloadSinglePhoto(item) {
 
 /**
  * Bundles all processed photos directly in the root of a single .zip archive
- * while preserving original filenames (and adding (2), (3) only if duplicate names exist).
+ * while preserving full original filenames (including dots like "20.A18115760.jpg").
  *
  * @param {Array} readyItems - Array of photo items with processedBlob
  * @param {Function} onProgress - Optional progress callback (0 to 100)
@@ -57,14 +57,13 @@ export async function downloadBatchAsZip(readyItems, onProgress) {
     const finalFileName =
       prevCount === 0 ? `${safeBase}.jpg` : `${safeBase} (${prevCount + 1}).jpg`;
 
-    // Place directly in the root of the ZIP archive (no subfolder)
     zip.file(finalFileName, item.processedBlob);
   }
 
   const zipBlob = await zip.generateAsync(
     {
       type: 'blob',
-      compression: 'STORE', // JPEGs are already compressed; STORE makes ZIP generation near-instant
+      compression: 'STORE',
     },
     (metadata) => {
       if (onProgress) {
